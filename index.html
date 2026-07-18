@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI English Cloud Sync</title>
+    <title>AI English Multi-User Cloud</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
@@ -17,35 +17,43 @@
 </head>
 <body class="h-screen w-screen flex flex-col overflow-hidden">
 
-<!-- LOGIN SCREEN -->
+<!-- MÀN HÌNH ĐĂNG NHẬP NHIỀU TÀI KHOẢN -->
 <div id="login-screen" class="fixed inset-0 z-50 bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
     <div class="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md">
         <div class="text-center mb-6">
-            <h2 class="text-2xl font-bold text-gray-800">AI ENGLISH CLOUD</h2>
-            <p class="text-sm text-gray-500 mt-1">Đồng bộ đám mây qua hệ thống GitHub</p>
+            <h2 class="text-2xl font-bold text-gray-800">AI ENGLISH SYSTEM</h2>
+            <p class="text-sm text-gray-500 mt-1">Đăng nhập tài khoản học viên của bạn</p>
         </div>
         <div class="space-y-4">
-            <input type="password" id="login-password" class="w-full px-4 py-2.5 rounded-lg border text-center font-bold tracking-widest" value="th@nh341978">
-            <button onclick="handleLogin()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg shadow transition">ĐĂNG NHẬP & ĐỒNG BỘ</button>
+            <div>
+                <label class="block text-xs font-bold text-gray-600 uppercase mb-1">Tên đăng nhập (User)</label>
+                <input type="text" id="login-username" class="w-full px-4 py-2 rounded-lg border text-base font-medium" placeholder="Ví dụ: thanh, lam, anh...">
+            </div>
+            <div>
+                <label class="block text-xs font-bold text-gray-600 uppercase mb-1">Mật khẩu (Password)</label>
+                <input type="password" id="login-password" class="w-full px-4 py-2 rounded-lg border text-base" placeholder="••••••••">
+            </div>
+            <button onclick="handleLogin()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg shadow transition mt-2">ĐĂNG NHẬP HỌC TẬP</button>
         </div>
     </div>
 </div>
 
-<!-- MAIN APP -->
+<!-- GIAO DIỆN CHƯƠNG TRÌNH CHÍNH -->
 <div id="main-dashboard" class="hidden flex-1 flex flex-col bg-gray-50 h-full overflow-hidden">
     <header class="bg-neutral-900 text-white py-2.5 px-4 shadow-md flex items-center justify-between shrink-0">
         <div>
-            <span class="text-green-400 font-extrabold uppercase tracking-wider">● GITHUB CLOUD SYNCED</span>
+            <span class="text-green-400 font-extrabold uppercase tracking-wider">● HỌC VIÊN: </span>
+            <span id="display-user" class="text-white font-bold uppercase ml-1"></span>
         </div>
-        <button onclick="handleLogout()" class="bg-red-600 text-xs font-bold px-3 py-1.5 rounded-lg">Đăng Xuất</button>
+        <button onclick="handleLogout()" class="bg-red-600 hover:bg-red-700 text-xs font-bold px-3 py-1.5 rounded-lg transition">Đăng Xuất</button>
     </header>
 
     <div class="p-4 pb-2 border-b shrink-0">
         <div class="max-w-7xl w-full mx-auto bg-white rounded-xl border p-3 space-y-3 shadow-sm">
-            <div id="text-input" class="rich-input-box text-base text-gray-800 custom-scrollbar" contenteditable="true" placeholder="Nhập câu tại đây (PC/iPad/iPhone)..."></div>
+            <div id="text-input" class="rich-input-box text-base text-gray-800 custom-scrollbar" contenteditable="true" placeholder="Nhập câu tiếng Anh hoặc tiếng Việt tại đây..."></div>
             <div class="flex items-center justify-between flex-wrap gap-2 pt-2 border-t">
-                <button onclick="translateAndSave()" id="btn-submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold px-5 py-2 rounded-lg text-sm transition">DỊCH & ĐỒNG BỘ LÊN GITHUB</button>
-                <label class="text-sm text-gray-600"><input type="checkbox" id="auto-speak" checked> Auto TTS</label>
+                <button onclick="translateAndSave()" id="btn-submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold px-5 py-2 rounded-lg text-sm transition">DỊCH & LƯU LÊN GITHUB</button>
+                <label class="text-sm text-gray-600"><input type="checkbox" id="auto-speak" checked> Tự động phát âm (TTS)</label>
             </div>
         </div>
     </div>
@@ -53,11 +61,11 @@
     <main class="flex-1 max-w-7xl w-full mx-auto p-4 pt-2 min-h-0 overflow-hidden">
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4 h-full min-h-0">
             <div class="bg-white rounded-xl border flex flex-col h-full overflow-hidden">
-                <div class="bg-gray-50 border-b px-4 py-2"><h3 class="font-bold text-blue-600 text-sm">TIẾNG ANH</h3></div>
+                <div class="bg-gray-50 border-b px-4 py-2"><h3 class="font-bold text-blue-600 text-sm">NHẬT KÝ TIẾNG ANH</h3></div>
                 <div id="en-list-container" class="flex-1 p-4 space-y-3 overflow-y-auto custom-scrollbar"></div>
             </div>
             <div class="bg-white rounded-xl border flex flex-col h-full overflow-hidden">
-                <div class="bg-gray-50 border-b px-4 py-2"><h3 class="font-bold text-green-600 text-sm">TIẾNG VIỆT</h3></div>
+                <div class="bg-gray-50 border-b px-4 py-2"><h3 class="font-bold text-green-600 text-sm">BẢN DỊCH TIẾNG VIỆT</h3></div>
                 <div id="vi-list-container" class="flex-1 p-4 space-y-3 overflow-y-auto custom-scrollbar"></div>
             </div>
         </div>
@@ -65,32 +73,50 @@
 </div>
 
 <script>
+    let currentUsername = "";
     let learningLog = [];
 
     async function handleLogin() {
-        const pass = document.getElementById('login-password').value.trim();
-        if(pass === "th@nh341978") {
-            document.getElementById('login-screen').classList.add('hidden');
-            document.getElementById('main-dashboard').classList.remove('hidden');
-            await fetchLogsFromCloud();
-        } else { alert('Sai mật khẩu!'); }
+        const usernameInput = document.getElementById('login-username').value.trim();
+        const passwordInput = document.getElementById('login-password').value.trim();
+        
+        if(!usernameInput || !passwordInput) {
+            alert("Vui lòng điền đầy đủ User và Password!");
+            return;
+        }
+
+        try {
+            let res = await fetch('/api/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: usernameInput, password: passwordInput })
+            });
+            let result = await res.json();
+            
+            if(result.status === "success") {
+                currentUsername = result.username;
+                learningLog = result.data;
+                
+                document.getElementById('display-user').innerText = currentUsername;
+                document.getElementById('login-screen').classList.add('hidden');
+                document.getElementById('main-dashboard').classList.remove('hidden');
+                
+                renderLogs();
+            } else {
+                alert(result.message);
+            }
+        } catch (e) {
+            alert("Không thể kết nối đến máy chủ!");
+        }
     }
 
     function handleLogout() {
+        currentUsername = "";
+        learningLog = [];
+        document.getElementById('login-username').value = "";
+        document.getElementById('login-password').value = "";
         document.getElementById('login-screen').classList.remove('hidden');
         document.getElementById('main-dashboard').classList.add('hidden');
-    }
-
-    // Tải dữ liệu đám mây từ GitHub về thiết bị thông qua Flask Proxy
-    async function fetchLogsFromCloud() {
-        try {
-            let res = await fetch('/api/get-logs');
-            let result = await res.json();
-            if(result.status === "success") {
-                learningLog = result.data;
-                renderLogs();
-            }
-        } catch (e) { alert("Lỗi tải dữ liệu đám mây!"); }
     }
 
     async function translateAndSave() {
@@ -100,14 +126,13 @@
         if(!cleanText) return;
 
         const btn = document.getElementById('btn-submit');
-        btn.innerText = "ĐANG ĐỒNG BỘ...";
+        btn.innerText = "ĐANG ĐỒNG BỘ GITHUB...";
         btn.disabled = true;
 
         let viChars = cleanText.match(/[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i);
         let isEng = !viChars;
 
         try {
-            // Bước 1: Gọi API Dịch
             let transRes = await fetch('/api/translate', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -117,21 +142,20 @@
             
             if(transData.status === "success") {
                 let now = new Date();
-                let displayDate = `${now.getHours()}:${now.getMinutes()} - ${now.getDate()}.${now.getMonth()+1}.${now.getFullYear()}`;
+                let displayDate = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')} - ${now.getDate()}.${now.getMonth()+1}.${now.getFullYear()}`;
                 
                 let newEntry = {
                     en: isEng ? rawText : transData.translated,
                     vi: isEng ? transData.translated : rawText,
                     ipa: "/.../",
-                    grammar: "✅ Đã kiểm tra đám mây.",
+                    grammar: "✅ Lưu đám mây thành công.",
                     date: displayDate
                 };
 
-                // Bước 2: Đẩy trực tiếp bản ghi mới lên file JSON trên GitHub
                 let saveRes = await fetch('/api/save-log', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(newEntry)
+                    body: JSON.stringify({ username: currentUsername, entry: newEntry })
                 });
                 let saveData = await saveRes.json();
                 
@@ -139,6 +163,7 @@
                     learningLog = saveData.data;
                     renderLogs();
                     inputContainer.innerHTML = '';
+                    
                     if(document.getElementById('auto-speak').checked) {
                         let speakTarget = isEng ? cleanText : transData.translated;
                         let msg = new SpeechSynthesisUtterance(new DOMParser().parseFromString(speakTarget, 'text/html').body.textContent);
@@ -147,26 +172,26 @@
                     }
                 }
             }
-        } catch (error) { alert("Kết nối gián đoạn!"); }
+        } catch (error) { alert("Mất kết nối đồng bộ!"); }
         
-        btn.innerText = "DỊCH & ĐỒNG BỘ LÊN GITHUB";
+        btn.innerText = "DỊCH & LƯU LÊN GITHUB";
         btn.disabled = false;
     }
 
     async function deleteLog(index) {
-        if(!confirm("Xóa câu này trên Cloud GitHub?")) return;
+        if(!confirm("Xóa câu này khỏi kho lưu trữ GitHub của bạn?")) return;
         try {
             let res = await fetch('/api/delete-log', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ index: index })
+                body: JSON.stringify({ username: currentUsername, index: index })
             });
             let result = await res.json();
             if(result.status === "success") {
                 learningLog = result.data;
                 renderLogs();
             }
-        } catch (e) { alert("Xóa thất bại!"); }
+        } catch (e) { alert("Xóa dữ liệu thất bại!"); }
     }
 
     function renderLogs() {
