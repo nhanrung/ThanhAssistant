@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI English Cloud Sync</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; background-color: #f3f4f6; }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f1f1; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        .rich-input-box { min-height: 80px; max-height: 180px; overflow-y: auto; border: 1px solid #d1d5db; padding: 10px; border-radius: 0.5rem; background-color: #ffffff; }
+        .rich-input-box:empty:before { content: attr(placeholder); color: #9ca3af; font-style: italic; }
+    </style>
+</head>
+<body class="h-screen w-screen flex flex-col overflow-hidden">
+
+<!-- LOGIN SCREEN -->
+<div id="login-screen" class="fixed inset-0 z-50 bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md">
+        <div class="text-center mb-6">
+            <h2 class="text-2xl font-bold text-gray-800">AI ENGLISH CLOUD</h2>
+            <p class="text-sm text-gray-500 mt-1">Đồng bộ đám mây qua hệ thống GitHub</p>
+        </div>
+        <div class="space-y-4">
+            <input type="password" id="login-password" class="w-full px-4 py-2.5 rounded-lg border text-center font-bold tracking-widest" value="th@nh341978">
+            <button onclick="handleLogin()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg shadow transition">ĐĂNG NHẬP & ĐỒNG BỘ</button>
+        </div>
+    </div>
+</div>
+
+<!-- MAIN APP -->
+<div id="main-dashboard" class="hidden flex-1 flex flex-col bg-gray-50 h-full overflow-hidden">
+    <header class="bg-neutral-900 text-white py-2.5 px-4 shadow-md flex items-center justify-between shrink-0">
+        <div>
+            <span class="text-green-400 font-extrabold uppercase tracking-wider">● GITHUB CLOUD SYNCED</span>
+        </div>
+        <button onclick="handleLogout()" class="bg-red-600 text-xs font-bold px-3 py-1.5 rounded-lg">Đăng Xuất</button>
+    </header>
+
+    <div class="p-4 pb-2 border-b shrink-0">
+        <div class="max-w-7xl w-full mx-auto bg-white rounded-xl border p-3 space-y-3 shadow-sm">
+            <div id="text-input" class="rich-input-box text-base text-gray-800 custom-scrollbar" contenteditable="true" placeholder="Nhập câu tại đây (PC/iPad/iPhone)..."></div>
+            <div class="flex items-center justify-between flex-wrap gap-2 pt-2 border-t">
+                <button onclick="translateAndSave()" id="btn-submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold px-5 py-2 rounded-lg text-sm transition">DỊCH & ĐỒNG BỘ LÊN GITHUB</button>
+                <label class="text-sm text-gray-600"><input type="checkbox" id="auto-speak" checked> Auto TTS</label>
+            </div>
+        </div>
+    </div>
+
+    <main class="flex-1 max-w-7xl w-full mx-auto p-4 pt-2 min-h-0 overflow-hidden">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 h-full min-h-0">
+            <div class="bg-white rounded-xl border flex flex-col h-full overflow-hidden">
+                <div class="bg-gray-50 border-b px-4 py-2"><h3 class="font-bold text-blue-600 text-sm">TIẾNG ANH</h3></div>
+                <div id="en-list-container" class="flex-1 p-4 space-y-3 overflow-y-auto custom-scrollbar"></div>
+            </div>
+            <div class="bg-white rounded-xl border flex flex-col h-full overflow-hidden">
+                <div class="bg-gray-50 border-b px-4 py-2"><h3 class="font-bold text-green-600 text-sm">TIẾNG VIỆT</h3></div>
+                <div id="vi-list-container" class="flex-1 p-4 space-y-3 overflow-y-auto custom-scrollbar"></div>
+            </div>
+        </div>
+    </main>
+</div>
+
+<script>
+    let learningLog = [];
+
+    async function handleLogin() {
+        const pass = document.getElementById('login-password').value.trim();
+        if(pass === "th@nh341978") {
+            document.getElementById('login-screen').classList.add('hidden');
+            document.getElementById('main-dashboard').classList.remove('hidden');
+            await fetchLogsFromCloud();
+        } else { alert('Sai mật khẩu!'); }
+    }
+
+    function handleLogout() {
+        document.getElementById('login-screen').classList.remove('hidden');
+        document.getElementById('main-dashboard').classList.add('hidden');
+    }
+
+    // Tải dữ liệu đám mây từ GitHub về thiết bị thông qua Flask Proxy
+    async function fetchLogsFromCloud() {
+        try {
+            let res = await fetch('/api/get-logs');
+            let result = await res.json();
+            if(result.status === "success") {
+                learningLog = result.data;
+                renderLogs();
+            }
+        } catch (e) { alert("Lỗi tải dữ liệu đám mây!"); }
+    }
+
+    async function translateAndSave() {
+        const inputContainer = document.getElementById('text-input');
+        const rawText = inputContainer.innerHTML.trim();
+        const cleanText = inputContainer.textContent.trim();
+        if(!cleanText) return;
+
+        const btn = document.getElementById('btn-submit');
+        btn.innerText = "ĐANG ĐỒNG BỘ...";
+        btn.disabled = true;
+
+        let viChars = cleanText.match(/[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i);
+        let isEng = !viChars;
+
+        try {
+            // Bước 1: Gọi API Dịch
+            let transRes = await fetch('/api/translate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: rawText, source_lang: isEng?'en':'vi', target_lang: isEng?'vi':'en' })
+            });
+            let transData = await transRes.json();
+            
+            if(transData.status === "success") {
+                let now = new Date();
+                let displayDate = `${now.getHours()}:${now.getMinutes()} - ${now.getDate()}.${now.getMonth()+1}.${now.getFullYear()}`;
+                
+                let newEntry = {
+                    en: isEng ? rawText : transData.translated,
+                    vi: isEng ? transData.translated : rawText,
+                    ipa: "/.../",
+                    grammar: "✅ Đã kiểm tra đám mây.",
+                    date: displayDate
+                };
+
+                // Bước 2: Đẩy trực tiếp bản ghi mới lên file JSON trên GitHub
+                let saveRes = await fetch('/api/save-log', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(newEntry)
+                });
+                let saveData = await saveRes.json();
+                
+                if(saveData.status === "success") {
+                    learningLog = saveData.data;
+                    renderLogs();
+                    inputContainer.innerHTML = '';
+                    if(document.getElementById('auto-speak').checked) {
+                        let speakTarget = isEng ? cleanText : transData.translated;
+                        let msg = new SpeechSynthesisUtterance(new DOMParser().parseFromString(speakTarget, 'text/html').body.textContent);
+                        msg.lang = 'en-US';
+                        window.speechSynthesis.speak(msg);
+                    }
+                }
+            }
+        } catch (error) { alert("Kết nối gián đoạn!"); }
+        
+        btn.innerText = "DỊCH & ĐỒNG BỘ LÊN GITHUB";
+        btn.disabled = false;
+    }
+
+    async function deleteLog(index) {
+        if(!confirm("Xóa câu này trên Cloud GitHub?")) return;
+        try {
+            let res = await fetch('/api/delete-log', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ index: index })
+            });
+            let result = await res.json();
+            if(result.status === "success") {
+                learningLog = result.data;
+                renderLogs();
+            }
+        } catch (e) { alert("Xóa thất bại!"); }
+    }
+
+    function renderLogs() {
+        const enContainer = document.getElementById('en-list-container');
+        const viContainer = document.getElementById('vi-list-container');
+        enContainer.innerHTML = ''; viContainer.innerHTML = '';
+
+        learningLog.forEach((item, index) => {
+            let enBox = document.createElement('div');
+            enBox.className = "p-3 bg-slate-50 rounded-lg border relative group";
+            enBox.innerHTML = `
+                <div class="text-gray-900 font-medium">${item.en}</div>
+                <div class="text-[10px] text-gray-400 mt-1">${item.date}</div>
+                <button onclick="deleteLog(${index})" class="absolute top-2 right-2 text-red-500 opacity-0 group-hover:opacity-100 transition"><i class="fa-solid fa-trash"></i></button>
+            `;
+            enContainer.appendChild(enBox);
+
+            let viBox = document.createElement('div');
+            viBox.className = "p-3 bg-emerald-50/50 rounded-lg border";
+            viBox.innerHTML = `<div class="text-gray-800">${item.vi}</div>`;
+            viContainer.appendChild(viBox);
+        });
+    }
+</script>
+</body>
+</html>
