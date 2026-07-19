@@ -3,218 +3,901 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI English Multi-User Cloud</title>
+    <title>AI English Assistant</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; background-color: #f3f4f6; }
-        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f1f1; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f3f4f6; -webkit-tap-highlight-color: transparent; }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 4px; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
-        .rich-input-box { min-height: 80px; max-height: 180px; overflow-y: auto; border: 1px solid #d1d5db; padding: 10px; border-radius: 0.5rem; background-color: #ffffff; }
-        .rich-input-box:empty:before { content: attr(placeholder); color: #9ca3af; font-style: italic; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        .rich-input-box { min-height: 80px; max-height: 180px; overflow-y: auto; border: 1px solid #d1d5db; padding: 0.625rem 1rem; border-radius: 0.5rem; background-color: #ffffff; }
+        .rich-input-box:focus { outline: none; border-color: #3b82f6; box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2); }
+        .rich-input-box:empty:before { content: attr(placeholder); color: #9ca3af; font-style: italic; pointer-events: none; }
+        .tab-active { background-color: #2563eb; color: white; }
+        .tab-inactive { background-color: #e5e7eb; color: #374151; }
+        .user-card:hover { background-color: #eff6ff; }
+        .highlight-word {
+            background-color: #fde047 !important;
+            font-weight: bold !important;
+            border-radius: 0.25rem;
+            padding: 1px 4px;
+            color: #000000 !important;
+            display: inline-block;
+            box-shadow: 0 0 0 1px #facc15;
+        }
+        .word-span { display: inline-block; transition: background-color 0.05s ease; }
     </style>
 </head>
 <body class="h-screen w-screen flex flex-col overflow-hidden">
 
-<!-- MÀN HÌNH ĐĂNG NHẬP NHIỀU TÀI KHOẢN -->
 <div id="login-screen" class="fixed inset-0 z-50 bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
-    <div class="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md">
+    <div class="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md border border-gray-100">
         <div class="text-center mb-6">
-            <h2 class="text-2xl font-bold text-gray-800">AI ENGLISH SYSTEM</h2>
-            <p class="text-sm text-gray-500 mt-1">Đăng nhập tài khoản học viên của bạn</p>
+            <div class="w-16 h-16 bg-blue-600 rounded-2xl flex items-center justify-center mx-auto mb-3 shadow-lg">
+                <i class="fa-solid fa-graduation-cap text-white text-2xl"></i>
+            </div>
+            <h2 class="text-2xl font-bold text-gray-800 tracking-wide">AI ENGLISH</h2>
+            <p class="text-sm text-gray-500 mt-1">Nhật ký học tiếng Anh thông minh</p>
         </div>
         <div class="space-y-4">
             <div>
-                <label class="block text-xs font-bold text-gray-600 uppercase mb-1">Tên đăng nhập (User)</label>
-                <input type="text" id="login-username" class="w-full px-4 py-2 rounded-lg border text-base font-medium" placeholder="Ví dụ: thanh, lam, anh...">
+                <label class="block text-sm font-semibold text-gray-700 mb-1">Tài khoản:</label>
+                <input type="text" id="login-username" class="w-full px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-800" placeholder="Tên đăng nhập...">
             </div>
             <div>
-                <label class="block text-xs font-bold text-gray-600 uppercase mb-1">Mật khẩu (Password)</label>
-                <input type="password" id="login-password" class="w-full px-4 py-2 rounded-lg border text-base" placeholder="••••••••">
+                <label class="block text-sm font-semibold text-gray-700 mb-1">Mật khẩu:</label>
+                <input type="password" id="login-password" class="w-full px-4 py-3 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-800" placeholder="Mật khẩu...">
             </div>
-            <button onclick="handleLogin()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg shadow transition mt-2">ĐĂNG NHẬP HỌC TẬP</button>
+            <button onclick="handleLogin()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-4 rounded-lg transition duration-200 shadow-md flex items-center justify-center gap-2">
+                <i class="fa-solid fa-right-to-bracket"></i> ĐĂNG NHẬP
+            </button>
         </div>
     </div>
 </div>
 
-<!-- GIAO DIỆN CHƯƠNG TRÌNH CHÍNH -->
 <div id="main-dashboard" class="hidden flex-1 flex flex-col bg-gray-50 h-full overflow-hidden">
-    <header class="bg-neutral-900 text-white py-2.5 px-4 shadow-md flex items-center justify-between shrink-0">
-        <div>
-            <span class="text-green-400 font-extrabold uppercase tracking-wider">● HỌC VIÊN: </span>
-            <span id="display-user" class="text-white font-bold uppercase ml-1"></span>
+
+    <header class="bg-neutral-900 text-white py-2.5 px-4 shadow-md shrink-0 flex items-center justify-between gap-3">
+        <div class="flex items-center gap-2 min-w-0">
+            <button id="admin-panel-toggle" onclick="toggleAdminPanel()" class="hidden shrink-0 flex items-center gap-1.5 bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition">
+                <i class="fa-solid fa-users-gear"></i> <span class="hidden sm:inline">Quản lý</span>
+            </button>
+            <div class="min-w-0">
+                <span class="text-red-400 font-extrabold text-sm md:text-base uppercase tracking-wider">AI ENGLISH</span>
+                <span class="text-gray-400 text-xs mx-1">|</span>
+                <span id="header-role-badge" class="text-xs font-bold px-2 py-0.5 rounded-full bg-gray-700 text-gray-300"></span>
+                <span class="text-gray-300 text-sm font-semibold ml-1">NHẬT KÝ CỦA: <span id="header-user-display" class="text-white"></span></span>
+            </div>
         </div>
-        <button onclick="handleLogout()" class="bg-red-600 hover:bg-red-700 text-xs font-bold px-3 py-1.5 rounded-lg transition">Đăng Xuất</button>
+        <div class="flex items-center gap-2 shrink-0">
+            <div id="admin-view-selector" class="hidden flex items-center gap-1.5 bg-gray-700 rounded-lg px-2 py-1">
+                <i class="fa-solid fa-eye text-gray-400 text-xs"></i>
+                <select id="viewing-user-select" onchange="switchViewingUser()" class="bg-gray-600 text-white text-xs rounded px-1.5 py-0.5 border border-gray-500 focus:outline-none cursor-pointer max-w-[120px]"></select>
+            </div>
+            <button onclick="handleLogout()" class="flex items-center gap-1.5 bg-red-600 hover:bg-red-700 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition shadow shrink-0">
+                <i class="fa-solid fa-right-from-bracket"></i> <span class="hidden sm:inline">Đăng Xuất</span>
+            </button>
+        </div>
     </header>
 
-    <div class="p-4 pb-2 border-b shrink-0">
-        <div class="max-w-7xl w-full mx-auto bg-white rounded-xl border p-3 space-y-3 shadow-sm">
-            <div id="text-input" class="rich-input-box text-base text-gray-800 custom-scrollbar" contenteditable="true" placeholder="Nhập câu tiếng Anh hoặc tiếng Việt tại đây..."></div>
-            <div class="flex items-center justify-between flex-wrap gap-2 pt-2 border-t">
-                <button onclick="translateAndSave()" id="btn-submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold px-5 py-2 rounded-lg text-sm transition">DỊCH & LƯU LÊN GITHUB</button>
-                <label class="text-sm text-gray-600"><input type="checkbox" id="auto-speak" checked> Tự động phát âm (TTS)</label>
+    <div id="admin-panel" class="hidden fixed inset-0 z-40 flex">
+        <div class="absolute inset-0 bg-black/40" onclick="toggleAdminPanel()"></div>
+        <div class="relative bg-white w-full max-w-md shadow-2xl flex flex-col h-full overflow-hidden">
+            <div class="bg-amber-500 text-white px-4 py-3 flex items-center justify-between shrink-0">
+                <div class="flex items-center gap-2">
+                    <i class="fa-solid fa-users-gear text-lg"></i> <h2 class="font-bold text-lg">Quản lý Người Dùng</h2>
+                </div>
+                <button onclick="toggleAdminPanel()" class="text-white hover:text-amber-100"><i class="fa-solid fa-xmark text-xl"></i></button>
+            </div>
+            <div class="p-4 border-b border-gray-200 shrink-0 bg-amber-50">
+                <h3 class="font-bold text-sm text-amber-700 mb-2"><i class="fa-solid fa-user-plus"></i> Thêm người học mới</h3>
+                <div class="space-y-2">
+                    <div class="flex gap-2">
+                        <input type="text" id="new-user-username" class="flex-1 px-3 py-2 text-sm rounded-lg border border-gray-300 focus:outline-none" placeholder="Tên tài khoản">
+                        <input type="text" id="new-user-password" class="flex-1 px-3 py-2 text-sm rounded-lg border border-gray-300 focus:outline-none" placeholder="Mật khẩu">
+                    </div>
+                    <button onclick="createUser()" class="w-full bg-amber-500 hover:bg-amber-600 text-white font-bold py-2 rounded-lg text-sm transition flex items-center justify-center gap-1.5">Tạo tài khoản</button>
+                </div>
+            </div>
+            <div class="flex-1 overflow-y-auto custom-scrollbar">
+                <div class="p-4">
+                    <h3 class="font-bold text-sm text-gray-600 mb-3">Danh sách người học <span id="user-count-badge" class="ml-1 bg-blue-100 text-blue-600 text-xs font-bold px-2 py-0.5 rounded-full">0</span></h3>
+                    <div id="user-list-container" class="space-y-2"></div>
+                </div>
             </div>
         </div>
     </div>
 
-    <main class="flex-1 max-w-7xl w-full mx-auto p-4 pt-2 min-h-0 overflow-hidden">
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 h-full min-h-0">
-            <div class="bg-white rounded-xl border flex flex-col h-full overflow-hidden">
-                <div class="bg-gray-50 border-b px-4 py-2"><h3 class="font-bold text-blue-600 text-sm">NHẬT KÝ TIẾNG ANH</h3></div>
+    <div class="bg-gray-50 p-4 pb-2 border-b border-gray-200 shrink-0">
+        <div class="max-w-7xl w-full mx-auto space-y-3">
+            <div class="bg-white rounded-xl border border-gray-200 p-3 space-y-3 shadow-sm">
+                <div class="flex items-center gap-1.5 p-1 bg-gray-50 rounded-lg border border-gray-200 text-xs font-bold text-gray-600 select-none">
+                    <span class="px-2 text-gray-400 border-r text-[11px] uppercase tracking-wider">Định dạng:</span>
+                    <button type="button" onclick="formatDoc('bold')" class="px-3 py-1 hover:bg-gray-200 rounded border bg-white shadow-sm"><b>B</b></button>
+                    <button type="button" onclick="formatDoc('italic')" class="px-3 py-1 hover:bg-gray-200 rounded border bg-white shadow-sm italic">I</button>
+                    <button type="button" onclick="formatDoc('boldAndItalic')" class="px-3 py-1 hover:bg-gray-200 rounded border bg-white shadow-sm font-bold italic">B&I</button>
+                    <button type="button" onclick="formatDoc('strikeThrough')" class="px-3 py-1 hover:bg-gray-200 rounded border bg-white shadow-sm line-through">S</button>
+                    <span id="writing-for-badge" class="hidden ml-auto bg-blue-100 text-blue-700 text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0">Đang nhập cho: <span id="writing-for-name"></span></span>
+                </div>
+                <div class="flex flex-col md:flex-row gap-3">
+                    <div id="text-input" class="flex-1 rich-input-box text-base text-gray-800 custom-scrollbar" contenteditable="true" placeholder="Nhập nội dung câu học tại đây..."></div>
+                    <div class="flex md:flex-col justify-center gap-2 shrink-0">
+                        <button onclick="startVoiceRecord('en-US')" class="flex items-center justify-center gap-2 bg-blue-50 hover:bg-blue-100 text-blue-700 font-semibold px-4 py-2.5 rounded-lg border border-blue-200 text-sm"><i class="fa-solid fa-microphone"></i> US Đọc EN</button>
+                        <button onclick="startVoiceRecord('vi-VN')" class="flex items-center justify-center gap-2 bg-green-50 hover:bg-green-100 text-green-700 font-semibold px-4 py-2.5 rounded-lg border border-green-200 text-sm"><i class="fa-solid fa-microphone"></i> VN Đọc VI</button>
+                    </div>
+                </div>
+                <div class="flex items-center justify-between flex-wrap gap-2 pt-2 border-t border-gray-100">
+                    <div class="flex items-center gap-2 flex-wrap">
+                        <button onclick="translateAndSave()" class="bg-blue-600 hover:bg-blue-700 text-white font-bold px-5 py-2.5 rounded-lg shadow transition text-sm">DỊCH & LƯU</button>
+                        <div class="flex items-center bg-gray-100 p-1 rounded-lg border border-gray-200">
+                            <button onclick="speakSelectedSentence()" class="flex items-center justify-center gap-1.5 hover:bg-emerald-600 hover:text-white text-emerald-700 font-bold py-1.5 px-3 rounded-md text-xs"><i class="fa-solid fa-volume-high"></i> NGHE ĐỌC</button>
+                            <div class="w-[1px] h-4 bg-gray-300 mx-1"></div>
+                            <button onclick="editSelectedSentence()" class="flex items-center justify-center gap-1.5 hover:bg-amber-500 hover:text-white text-amber-700 font-bold py-1.5 px-3 rounded-md text-xs"><i class="fa-solid fa-pen-to-square"></i> SỬA CÂU</button>
+                            <div class="w-[1px] h-4 bg-gray-300 mx-1"></div>
+                            <button onclick="deleteSelectedSentence()" class="flex items-center justify-center gap-1.5 hover:bg-rose-600 hover:text-white text-rose-700 font-bold py-1.5 px-3 rounded-md text-xs"><i class="fa-solid fa-trash-can"></i> XÓA CÂU</button>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-3 flex-wrap">
+                        <div class="flex items-center gap-1.5 text-xs text-gray-600 font-semibold bg-gray-100 px-2 py-1.5 rounded-lg border border-gray-200">
+                            <i class="fa-solid fa-circle-user text-blue-500"></i> Giọng:
+                            <select id="voice-select" class="bg-white border rounded px-1.5 py-0.5 text-xs focus:outline-none max-w-[160px] text-gray-700 cursor-pointer"></select>
+                        </div>
+                        <div class="flex items-center gap-1.5 text-xs text-gray-600 font-semibold bg-gray-100 px-2 py-1.5 rounded-lg border border-gray-200">
+                            <i class="fa-solid fa-gauge text-purple-500"></i> Tốc độ:
+                            <input type="range" id="speed-slider" min="0.5" max="2" step="0.1" value="1" class="w-20 accent-purple-500 cursor-pointer" oninput="document.getElementById('speed-label').textContent = parseFloat(this.value).toFixed(1) + 'x';">
+                            <span id="speed-label" class="text-purple-600 font-bold w-8 text-center">1.0x</span>
+                        </div>
+                        <label class="flex items-center gap-2 text-sm font-semibold text-gray-600 cursor-pointer">
+                            <input type="checkbox" id="auto-speak" class="w-4 h-4 text-blue-600 rounded" checked> Tự động phát âm
+                        </label>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <main class="flex-1 max-w-7xl w-full mx-auto p-4 pt-2 min-h-0">
+        <div id="admin-tabs" class="hidden flex items-center gap-2 mb-3">
+            <button id="tab-my-log" onclick="switchTab('my')" class="tab-active px-4 py-1.5 rounded-lg text-sm font-bold">Nhật ký của tôi</button>
+            <button id="tab-all-log" onclick="switchTab('all')" class="tab-inactive px-4 py-1.5 rounded-lg text-sm font-bold">Tất cả người học</button>
+        </div>
+        <div id="view-single" class="grid grid-cols-1 md:grid-cols-2 gap-4 h-full min-h-0">
+            <div class="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col h-full min-h-0 overflow-hidden">
+                <div class="bg-gray-50 border-b border-gray-200 px-4 py-2.5"><h3 class="font-bold text-blue-600 text-sm uppercase">TIẾNG ANH & PHIÊN ÂM</h3></div>
                 <div id="en-list-container" class="flex-1 p-4 space-y-3 overflow-y-auto custom-scrollbar"></div>
             </div>
-            <div class="bg-white rounded-xl border flex flex-col h-full overflow-hidden">
-                <div class="bg-gray-50 border-b px-4 py-2"><h3 class="font-bold text-green-600 text-sm">BẢN DỊCH TIẾNG VIỆT</h3></div>
+            <div class="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col h-full min-h-0 overflow-hidden">
+                <div class="bg-gray-50 border-b border-gray-200 px-4 py-2.5"><h3 class="font-bold text-green-600 text-sm uppercase">NGHĨA TIẾNG VIỆT</h3></div>
                 <div id="vi-list-container" class="flex-1 p-4 space-y-3 overflow-y-auto custom-scrollbar"></div>
             </div>
         </div>
     </main>
 </div>
 
+<div id="reading-controls" class="hidden fixed bottom-6 left-1/2 transform -translate-x-1/2 bg-white/95 backdrop-blur shadow-2xl rounded-2xl p-4 z-50 border border-emerald-100 w-full max-w-md">
+    <div class="flex items-center justify-between mb-2">
+        <span class="text-xs font-bold text-emerald-700 uppercase flex items-center gap-1">Trình đọc thông minh</span>
+        <button onclick="stopReading()" class="text-gray-400 hover:text-gray-600"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <div id="now-reading" class="text-sm text-gray-700 font-medium mb-3 max-h-28 overflow-y-auto custom-scrollbar bg-gray-50 px-3 py-3 rounded border text-left leading-relaxed"></div>
+    <div class="flex items-center gap-3 mb-3">
+        <button onclick="togglePauseResume()" id="pause-btn" class="flex-1 bg-emerald-600 text-white font-bold py-2 rounded-xl flex items-center justify-center gap-2 shadow"><i class="fa-solid fa-pause" id="pause-icon"></i> <span id="pause-text">TẠM DỪNG</span></button>
+        <button onclick="stopReading()" class="flex-1 bg-gray-500 text-white font-bold py-2 rounded-xl flex items-center justify-center gap-2 shadow">DỪNG LẠI</button>
+    </div>
+    <div class="flex items-center gap-2 text-xs text-gray-500">
+        <span id="current-time" class="font-mono bg-gray-100 px-1.5 py-0.5 rounded">0:00</span>
+        <input type="range" id="seek-slider" min="0" max="100" value="0" class="flex-1 accent-emerald-500 h-1.5 bg-gray-200 rounded-lg appearance-none cursor-pointer" oninput="seekTo(this.value)">
+        <span id="total-time" class="font-mono bg-gray-100 px-1.5 py-0.5 rounded">0:00</span>
+    </div>
+</div>
+
+<div id="edit-modal" class="hidden fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+    <div class="bg-white rounded-lg shadow-xl p-6 w-full max-w-lg">
+        <h3 class="text-lg font-bold text-gray-800 mb-4">Chỉnh sửa nội dung câu</h3>
+        <div class="space-y-4">
+            <div>
+                <label class="block text-xs font-semibold text-gray-600 mb-1">CÂU TIẾNG ANH:</label>
+                <div id="modal-en" class="rich-input-box text-sm text-gray-800" contenteditable="true"></div>
+            </div>
+            <div>
+                <label class="block text-xs font-semibold text-gray-600 mb-1">NGHĨA TIẾNG VIỆT:</label>
+                <div id="modal-vi" class="rich-input-box text-sm text-gray-800" contenteditable="true"></div>
+            </div>
+            <div class="flex justify-end gap-2 pt-2 border-t">
+                <button onclick="closeEditModal()" class="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg">Hủy</button>
+                <button onclick="saveEditModal()" class="px-4 py-2 bg-blue-600 text-white rounded-lg">Lưu</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
-    let currentUsername = "";
-    let learningLog = [];
+// ============================================================
+// BIẾN TRẠNG THÁI TOÀN CỤC
+// ============================================================
+let currentRole = "", currentSysUser = "", currentPassword = "", currentUsername = "", viewingUsername = "";
+let learningLogs = [], selectedIndex = null, systemVoices = [], currentTab = "my";
+let subUsersList = [];
 
-    async function handleLogin() {
-        const usernameInput = document.getElementById('login-username').value.trim();
-        const passwordInput = document.getElementById('login-password').value.trim();
-        
-        if(!usernameInput || !passwordInput) {
-            alert("Vui lòng điền đầy đủ User và Password!");
-            return;
-        }
+let currentUtterance = null;
+let isPaused = false;
+let currentReadingIndex = null;
+let wordElementsInLog = [];
+let wordElementsInBox = [];
+let timerInterval = null;
+let startTime = 0;
+let elapsedTime = 0;
 
-        try {
-            let res = await fetch('/api/login', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username: usernameInput, password: passwordInput })
-            });
-            let result = await res.json();
-            
-            if(result.status === "success") {
-                currentUsername = result.username;
-                learningLog = result.data;
-                
-                document.getElementById('display-user').innerText = currentUsername;
-                document.getElementById('login-screen').classList.add('hidden');
-                document.getElementById('main-dashboard').classList.remove('hidden');
-                
-                renderLogs();
+// Hàng đợi từ + mảng setTimeout để highlight TRƯỚC khi đọc tới
+let currentWordsQueue = [];
+let highlightTimers = [];        // danh sách timer IDs
+let readingStartTime = 0;        // thời điểm bắt đầu đọc (Date.now())
+let pausedAtMs = 0;              // tổng ms đã trôi qua khi nhấn pause
+let readingStartIdx = 0;         // index từ bắt đầu đọc lần này
+
+// ============================================================
+// TÍNH THỜI GIAN MỖI TỪ — dựa trên số ký tự + tốc độ
+// Trung bình tiếng Anh: ~13 ký tự/giây ở rate=1
+// ============================================================
+function estimateWordDurations(words, rate) {
+    // Tốc độ ký tự/ms ở rate=1 là ~13/1000
+    const charsPerMs = (13 * rate) / 1000;
+    // Mỗi từ: thời gian tỉ lệ ký tự, tối thiểu 60ms, thêm 30ms khoảng dừng giữa từ
+    return words.map(w => Math.max(60, Math.round(w.length / charsPerMs) + 30));
+}
+
+// Lưu thêm 1 mảng cumulative start times để seek
+let wordStartTimes = [];   // ms từ đầu (tính từ readingStartTime)
+let totalDurationMs = 0;
+
+function buildWordTimeline(words, rate) {
+    const durations = estimateWordDurations(words, rate);
+    const starts = [];
+    let acc = 0;
+    durations.forEach(d => { starts.push(acc); acc += d; });
+    totalDurationMs = acc;
+    return starts;
+}
+
+// ============================================================
+// AUTH & SESSION
+// ============================================================
+function handleUnauthorized() {
+    localStorage.clear();
+    document.getElementById("main-dashboard").classList.add("hidden");
+    document.getElementById("login-screen").classList.remove("hidden");
+}
+
+async function authFetch(url, options = {}) {
+    const response = await fetch(url, options);
+    if (response.status === 401) { handleUnauthorized(); throw new Error("UNAUTHORIZED"); }
+    return response;
+}
+
+window.onload = function() {
+    initVoiceSelection();
+    const saved = JSON.parse(localStorage.getItem("session") || "{}");
+    if (saved.sysUser && saved.password && saved.username) {
+        currentSysUser = saved.sysUser; currentPassword = saved.password;
+        currentUsername = saved.username; currentRole = saved.role;
+        viewingUsername = saved.username; enterDashboard();
+    }
+};
+
+async function handleLogin() {
+    const username = document.getElementById("login-username").value.trim().toLowerCase();
+    const password = document.getElementById("login-password").value.trim();
+    if (!username || !password) return;
+    try {
+        const resp = await fetch("/api/verify_password", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sys_username: username, password: password })
+        });
+        const data = await resp.json();
+        if (data.status === "success") {
+            currentSysUser = data.username; currentPassword = password; currentRole = data.role;
+            currentUsername = (data.role === "admin") ? data.username.replace("_admin", "") : data.username;
+            viewingUsername = currentUsername;
+            localStorage.setItem("session", JSON.stringify({ sysUser: currentSysUser, password: currentPassword, username: currentUsername, role: currentRole }));
+            enterDashboard();
+        } else { alert(data.message); }
+    } catch (e) { alert("Lỗi kết nối máy chủ!"); }
+}
+
+function enterDashboard() {
+    document.getElementById("login-screen").classList.add("hidden");
+    document.getElementById("main-dashboard").classList.remove("hidden");
+    document.getElementById("header-user-display").innerText = currentUsername.toUpperCase();
+    const badge = document.getElementById("header-role-badge");
+    if (currentRole === "admin") {
+        badge.innerText = "ADMIN"; badge.className = "text-xs font-bold px-2 py-0.5 rounded-full bg-amber-500 text-white";
+        document.getElementById("admin-panel-toggle").classList.remove("hidden");
+        document.getElementById("admin-view-selector").classList.remove("hidden");
+        document.getElementById("admin-tabs").classList.remove("hidden");
+        document.getElementById("writing-for-badge").classList.remove("hidden");
+        loadSubUsers();
+    } else {
+        badge.innerText = "HỌC SINH"; badge.className = "text-xs font-bold px-2 py-0.5 rounded-full bg-blue-700 text-blue-200";
+    }
+    updateWritingForBadge(); loadUserLogs();
+}
+
+function handleLogout() { stopReading(); localStorage.clear(); location.reload(); }
+
+async function loadSubUsers() {
+    try {
+        const resp = await authFetch(`/api/admin/list_users?password=${encodeURIComponent(currentPassword)}`);
+        const data = await resp.json();
+        if (data.status === "success") { subUsersList = data.users; updateViewingUserSelect(); renderUserList(); }
+    } catch(e) { console.error(e); }
+}
+
+function updateViewingUserSelect() {
+    const sel = document.getElementById("viewing-user-select");
+    sel.innerHTML = `<option value="${currentUsername}">${currentUsername.toUpperCase()}</option>`;
+    subUsersList.forEach(u => { sel.innerHTML += `<option value="${u.username}">${u.display_name}</option>`; });
+    sel.value = viewingUsername;
+}
+
+function renderUserList() {
+    const container = document.getElementById("user-list-container");
+    const countBadge = document.getElementById("user-count-badge");
+    if (!container) return;
+    container.innerHTML = "";
+    countBadge.innerText = subUsersList.length;
+    subUsersList.forEach(u => {
+        const card = document.createElement("div");
+        card.className = "user-card flex items-center justify-between p-3 rounded-lg border border-gray-100 bg-white cursor-pointer";
+        card.innerHTML = `
+            <div class="flex items-center gap-2">
+                <i class="fa-solid fa-user-graduate text-blue-400"></i>
+                <span class="text-sm font-semibold text-gray-700">${u.display_name}</span>
+            </div>
+            <button onclick="event.stopPropagation(); deleteUser('${u.username}')" class="text-xs text-red-400 hover:text-red-600 px-2 py-1 rounded hover:bg-red-50">
+                <i class="fa-solid fa-trash-can"></i>
+            </button>
+        `;
+        card.onclick = () => {
+            viewingUsername = u.username;
+            document.getElementById("viewing-user-select").value = u.username;
+            updateWritingForBadge(); loadUserLogs(); toggleAdminPanel();
+        };
+        container.appendChild(card);
+    });
+}
+
+async function createUser() {
+    const username = document.getElementById("new-user-username").value.trim().toLowerCase();
+    const password = document.getElementById("new-user-password").value.trim();
+    if (!username || !password) { alert("Vui lòng nhập đầy đủ tài khoản và mật khẩu!"); return; }
+    try {
+        const resp = await authFetch("/api/admin/create_user", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ admin_password: currentPassword, username, password })
+        });
+        const data = await resp.json();
+        if (data.status === "success") {
+            document.getElementById("new-user-username").value = "";
+            document.getElementById("new-user-password").value = "";
+            await loadSubUsers();
+        } else { alert(data.message || "Tạo tài khoản thất bại!"); }
+    } catch(e) { console.error(e); }
+}
+
+async function deleteUser(username) {
+    if (!confirm(`Xóa tài khoản "${username}"? Toàn bộ nhật ký sẽ bị mất!`)) return;
+    try {
+        const resp = await authFetch("/api/admin/delete_user", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ admin_password: currentPassword, username })
+        });
+        const data = await resp.json();
+        if (data.status === "success") { await loadSubUsers(); }
+        else { alert(data.message || "Xóa thất bại!"); }
+    } catch(e) { console.error(e); }
+}
+
+async function switchViewingUser() { viewingUsername = document.getElementById("viewing-user-select").value; updateWritingForBadge(); loadUserLogs(); }
+function updateWritingForBadge() { document.getElementById("writing-for-name").innerText = viewingUsername.toUpperCase(); }
+function switchTab(tab) {
+    currentTab = tab;
+    document.getElementById("tab-my-log").className = tab === "my" ? "tab-active px-4 py-1.5 rounded-lg text-sm font-bold" : "tab-inactive px-4 py-1.5 rounded-lg text-sm font-bold";
+    document.getElementById("tab-all-log").className = tab === "all" ? "tab-active px-4 py-1.5 rounded-lg text-sm font-bold" : "tab-inactive px-4 py-1.5 rounded-lg text-sm font-bold";
+}
+
+async function loadUserLogs() {
+    try {
+        const resp = await authFetch(`/api/load_log?username=${viewingUsername}&password=${encodeURIComponent(currentPassword)}`);
+        const data = await resp.json();
+        if (data.status === "success") { learningLogs = data.data; selectedIndex = null; renderLogs(); }
+    } catch(e) { console.error(e); }
+}
+
+// ============================================================
+// CHUYỂN VĂN BẢN THÀNH SPAN THEO TỪNG TỪ
+// Dùng TreeWalker để duyệt TEXT_NODE an toàn, không modify DOM khi đang duyệt
+// ============================================================
+function convertTextToSpans(htmlContent) {
+    const temp = document.createElement("div");
+    temp.innerHTML = htmlContent;
+
+    // BẢO VỆ CHỐNG LỒNG SPAN (nguyên nhân gây đọc lặp/nói lắp):
+    // Nếu nội dung truyền vào ĐÃ chứa sẵn các .word-span từ một lần
+    // convertTextToSpans() trước đó (ví dụ do bị gọi lại trên HTML đã
+    // qua xử lý), việc bọc thêm một lớp span nữa bên trong sẽ khiến
+    // querySelectorAll(".word-span") trả về NHIỀU phần tử trùng nhau
+    // cho cùng 1 từ (span cũ lồng bên trong span mới) -> hàng đợi từ
+    // để đọc bị nhân đôi/nhân ba -> nghe như bị lặp/nói lắp.
+    // Ở đây ta "gỡ" (unwrap) mọi .word-span có sẵn trước khi xử lý,
+    // đảm bảo luôn xuất phát từ text thuần, mỗi từ chỉ được bọc span
+    // đúng 1 lần duy nhất.
+    temp.querySelectorAll(".word-span").forEach(span => {
+        const text = document.createTextNode(span.textContent);
+        span.parentNode.replaceChild(text, span);
+    });
+    temp.normalize();
+
+    let wordIndex = 0;
+
+    // Thu thập tất cả TEXT_NODE trước, rồi mới thay thế
+    const walker = document.createTreeWalker(temp, NodeFilter.SHOW_TEXT, null, false);
+    const textNodes = [];
+    let node;
+    while ((node = walker.nextNode())) {
+        textNodes.push(node);
+    }
+
+    textNodes.forEach(textNode => {
+        const text = textNode.nodeValue;
+        // Nếu chỉ là whitespace thuần, giữ nguyên
+        if (/^\s*$/.test(text)) return;
+
+        const parts = text.split(/(\s+)/);
+        const fragment = document.createDocumentFragment();
+        parts.forEach(part => {
+            if (/^\s+$/.test(part) || part === "") {
+                fragment.appendChild(document.createTextNode(part));
             } else {
-                alert(result.message);
+                const span = document.createElement("span");
+                span.className = "word-span";
+                span.dataset.index = wordIndex++;
+                span.textContent = part;
+                fragment.appendChild(span);
             }
-        } catch (e) {
-            alert("Không thể kết nối đến máy chủ!");
+        });
+        if (textNode.parentNode) {
+            textNode.parentNode.replaceChild(fragment, textNode);
         }
+    });
+
+    return { html: temp.innerHTML, count: wordIndex };
+}
+
+function renderLogs() {
+    const enContainer = document.getElementById("en-list-container");
+    const viContainer = document.getElementById("vi-list-container");
+    enContainer.innerHTML = ""; viContainer.innerHTML = "";
+    let currentRenderDay = "";
+    if (!learningLogs || learningLogs.length === 0) return;
+
+    [...learningLogs].reverse().forEach((log, index) => {
+        const originalIndex = learningLogs.length - 1 - index;
+        const dateParts = log.date.split(" ");
+        let itemDate = dateParts[0];
+        let itemTime = dateParts[1] || dateParts[0];
+
+        if (itemDate.includes(".") && itemDate !== currentRenderDay) {
+            currentRenderDay = itemDate;
+            const divider = document.createElement("div");
+            divider.className = "text-center my-2 font-bold text-emerald-600 text-xs border-t border-b py-0.5 w-full";
+            divider.innerText = `————— NGÀY ${itemDate} —————`;
+            enContainer.appendChild(divider.cloneNode(true));
+            viContainer.appendChild(divider);
+        }
+
+        const isSelected = selectedIndex === originalIndex;
+        const baseCls = `p-3 rounded-lg border cursor-pointer transition w-full mb-2 ${isSelected ? 'bg-blue-50 border-blue-300' : 'bg-white border-gray-100'}`;
+
+        // --- EN item: xây DOM thủ công để tránh innerHTML stringify ---
+        const enItem = document.createElement("div");
+        enItem.className = baseCls;
+        enItem.id = `en-log-item-${originalIndex}`;
+        enItem.onclick = () => { selectedIndex = originalIndex; renderLogs(); };
+
+        // Dòng thời gian riêng
+        const timeSpan = document.createElement("div");
+        timeSpan.className = "text-gray-400 font-mono text-xs mb-1";
+        timeSpan.textContent = itemTime;
+        enItem.appendChild(timeSpan);
+
+        // Phần nội dung tiếng Anh — dùng div để giữ đúng cấu trúc block HTML gốc
+        const spanStructured = convertTextToSpans(log.en);
+        const contentWrap = document.createElement("div");
+        contentWrap.className = "content-text text-sm text-gray-800";
+        contentWrap.innerHTML = spanStructured.html;
+        enItem.appendChild(contentWrap);
+
+        // IPA line
+        const ipaLine = document.createElement("div");
+        ipaLine.className = "text-xs text-amber-600 font-medium mt-1";
+        ipaLine.innerHTML = `<i class="fa-solid fa-microphone-lines text-[10px]"></i> ${log.ipa}`;
+        enItem.appendChild(ipaLine);
+
+        enContainer.appendChild(enItem);
+
+        // --- VI item ---
+        const viItem = document.createElement("div");
+        viItem.className = baseCls;
+        viItem.onclick = () => { selectedIndex = originalIndex; renderLogs(); };
+        const viContent = document.createElement("div");
+        viContent.className = "text-sm text-gray-700";
+        viContent.innerHTML = log.vi;
+        viItem.appendChild(viContent);
+        viContainer.appendChild(viItem);
+    });
+}
+
+// ============================================================
+// LÕI PHÁT ÂM — HIGHLIGHT CHỦ ĐỘNG BẰNG SETTIMEOUT
+// Không phụ thuộc vào onboundary (unreliable trên Chrome/Edge)
+// ============================================================
+
+function clearHighlightTimers() {
+    highlightTimers.forEach(id => clearTimeout(id));
+    highlightTimers = [];
+}
+
+function highlightWordAt(idx) {
+    if (idx < 0) return;
+    requestAnimationFrame(() => {
+        wordElementsInLog.forEach(el => { if (el) el.classList.remove("highlight-word"); });
+        wordElementsInBox.forEach(el => { if (el) el.classList.remove("highlight-word"); });
+
+        if (wordElementsInLog[idx]) wordElementsInLog[idx].classList.add("highlight-word");
+        if (wordElementsInBox[idx]) {
+            wordElementsInBox[idx].classList.add("highlight-word");
+            wordElementsInBox[idx].scrollIntoView({ behavior: 'auto', block: 'nearest' });
+        }
+
+        const seekSlider = document.getElementById("seek-slider");
+        if (seekSlider && wordStartTimes.length > 1) {
+            const percent = (wordStartTimes[idx] / totalDurationMs) * 100;
+            seekSlider.value = isNaN(percent) ? 0 : Math.min(100, percent);
+        }
+
+        const elapsed = wordStartTimes[idx] || 0;
+        document.getElementById("current-time").innerText = formatTimeMs(elapsed);
+    });
+}
+
+// Lên lịch toàn bộ highlight cho các từ từ startIdx trở đi
+function scheduleHighlights(startIdx, starts, rate) {
+    clearHighlightTimers();
+    readingStartTime = Date.now();
+
+    // Ước lượng thời gian phát sinh giọng đọc (độ trễ khởi động TTS, ~100-250ms)
+    // Trừ đi để highlight sớm hơn một chút, bù cho lag render
+    const ttsStartupDelay = 120; // ms
+
+    for (let i = startIdx; i < currentWordsQueue.length; i++) {
+        const relIdx = i - startIdx;
+        // starts[relIdx]: ms từ đầu đoạn đọc hiện tại
+        // +ttsStartupDelay: TTS chưa thực sự phát âm ngay, chờ một chút
+        // nhưng highlight thì cần sớm hơn âm thanh để não cảm nhận đồng bộ
+        const delay = Math.max(0, starts[relIdx] + ttsStartupDelay);
+        const capturedI = i;
+        const id = setTimeout(() => {
+            if (!currentUtterance || isPaused) return;
+            highlightWordAt(capturedI);
+        }, delay);
+        highlightTimers.push(id);
+    }
+}
+
+function stopReading() {
+    clearHighlightTimers();
+    if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+    window.speechSynthesis.cancel();
+    currentUtterance = null;
+    isPaused = false;
+    currentReadingIndex = null;
+    currentWordsQueue = [];
+    wordStartTimes = [];
+    totalDurationMs = 0;
+    document.getElementById("reading-controls").classList.add("hidden");
+    document.getElementById("current-time").innerText = "0:00";
+    document.getElementById("seek-slider").value = 0;
+    renderLogs();
+}
+
+function speakSelectedSentence() {
+    if (selectedIndex === null || !learningLogs || !learningLogs[selectedIndex]) {
+        alert("Vui lòng chọn một câu trong danh sách nhật ký trước!");
+        return;
     }
 
-    function handleLogout() {
-        currentUsername = "";
-        learningLog = [];
-        document.getElementById('login-username').value = "";
-        document.getElementById('login-password').value = "";
-        document.getElementById('login-screen').classList.remove('hidden');
-        document.getElementById('main-dashboard').classList.add('hidden');
+    clearHighlightTimers();
+    window.speechSynthesis.cancel();
+    currentUtterance = null;
+    isPaused = false;
+
+    currentReadingIndex = selectedIndex;
+    const logItem = document.getElementById(`en-log-item-${currentReadingIndex}`);
+    if (!logItem) return;
+
+    const currentLogData = learningLogs[currentReadingIndex];
+    const boxStr = convertTextToSpans(currentLogData.en);
+    const boxContainer = document.getElementById("now-reading");
+
+    if (boxContainer) {
+        // Xóa nội dung cũ, gán HTML qua innerHTML (an toàn vì đây là display-only, không iterate khi modify)
+        boxContainer.innerHTML = "";
+        const displayDiv = document.createElement("div");
+        displayDiv.innerHTML = boxStr.html;
+        boxContainer.appendChild(displayDiv);
+        wordElementsInBox = Array.from(displayDiv.querySelectorAll(".word-span"));
+    } else {
+        wordElementsInBox = [];
     }
+    wordElementsInLog = Array.from(logItem.querySelectorAll(".content-text .word-span"));
 
-    async function translateAndSave() {
-        const inputContainer = document.getElementById('text-input');
-        const rawText = inputContainer.innerHTML.trim();
-        const cleanText = inputContainer.textContent.trim();
-        if(!cleanText) return;
+    currentWordsQueue = wordElementsInBox.map(el => el.textContent).filter(w => w.trim().length > 0);
+    if (currentWordsQueue.length === 0) return;
 
-        const btn = document.getElementById('btn-submit');
-        btn.innerText = "ĐANG ĐỒNG BỘ GITHUB...";
-        btn.disabled = true;
+    document.getElementById("reading-controls").classList.remove("hidden");
+    startReadingFrom(0);
+}
 
-        let viChars = cleanText.match(/[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i);
-        let isEng = !viChars;
+function startReadingFrom(startIdx) {
+    if (!currentWordsQueue || currentWordsQueue.length === 0) return;
+    if (startIdx < 0) startIdx = 0;
+    if (startIdx >= currentWordsQueue.length) { stopReading(); return; }
 
-        try {
-            let transRes = await fetch('/api/translate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: rawText, source_lang: isEng?'en':'vi', target_lang: isEng?'vi':'en' })
-            });
-            let transData = await transRes.json();
-            
-            if(transData.status === "success") {
-                let now = new Date();
-                let displayDate = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')} - ${now.getDate()}.${now.getMonth()+1}.${now.getFullYear()}`;
-                
-                let newEntry = {
-                    en: isEng ? rawText : transData.translated,
-                    vi: isEng ? transData.translated : rawText,
-                    ipa: "/.../",
-                    grammar: "✅ Lưu đám mây thành công.",
-                    date: displayDate
-                };
+    clearHighlightTimers();
+    window.speechSynthesis.cancel();
+    isPaused = false;
+    pausedAtMs = 0;
+    document.getElementById("pause-text").innerText = "TẠM DỪNG";
+    document.getElementById("pause-icon").className = "fa-solid fa-pause";
 
-                let saveRes = await fetch('/api/save-log', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username: currentUsername, entry: newEntry })
-                });
-                let saveData = await saveRes.json();
-                
-                if(saveData.status === "success") {
-                    learningLog = saveData.data;
-                    renderLogs();
-                    inputContainer.innerHTML = '';
-                    
-                    if(document.getElementById('auto-speak').checked) {
-                        let speakTarget = isEng ? cleanText : transData.translated;
-                        let msg = new SpeechSynthesisUtterance(new DOMParser().parseFromString(speakTarget, 'text/html').body.textContent);
-                        msg.lang = 'en-US';
-                        window.speechSynthesis.speak(msg);
-                    }
+    const speed = parseFloat(document.getElementById("speed-slider")?.value) || 1.0;
+    const wordsFromHere = currentWordsQueue.slice(startIdx);
+    const textFromHere = wordsFromHere.join(' ');
+
+    // Xây timeline cho TẤT CẢ từ (để seek slider đúng)
+    const allStarts = buildWordTimeline(currentWordsQueue, speed);
+    wordStartTimes = allStarts;
+
+    // Starts cho đoạn từ startIdx trở đi (relative)
+    const relativeStarts = buildWordTimeline(wordsFromHere, speed);
+
+    const utterance = new SpeechSynthesisUtterance(textFromHere);
+    const selectedVoiceName = document.getElementById("voice-select")?.value;
+    if (selectedVoiceName && systemVoices && systemVoices.length > 0) {
+        const matched = systemVoices.find(v => v.name === selectedVoiceName);
+        if (matched) utterance.voice = matched;
+    }
+    utterance.rate = speed;
+    utterance.lang = "en-US";
+
+    utterance.onstart = function() {
+        document.getElementById("reading-controls").classList.remove("hidden");
+        // Lên lịch highlight ngay khi TTS bắt đầu phát
+        scheduleHighlights(startIdx, relativeStarts, speed);
+        startTimer(totalDurationMs, allStarts[startIdx] || 0);
+    };
+
+    utterance.onend = function() {
+        clearHighlightTimers();
+        if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+        stopReading();
+    };
+
+    utterance.onerror = function(e) {
+        if (e.error === 'interrupted') return;
+        clearHighlightTimers();
+        stopReading();
+    };
+
+    // onboundary vẫn giữ làm fallback/correction nếu browser hỗ trợ tốt
+    // Nếu boundary fire thì cancel timer tương ứng và highlight ngay
+    utterance.onboundary = function(event) {
+        if (event.name !== 'word') return;
+        // Tìm index từ gần nhất theo charIndex
+        let charPos = 0;
+        let foundIdx = startIdx;
+        for (let i = 0; i < wordsFromHere.length; i++) {
+            if (charPos >= event.charIndex) { foundIdx = startIdx + i; break; }
+            charPos += wordsFromHere[i].length + 1;
+            foundIdx = startIdx + i;
+        }
+        // Nếu boundary fire sớm hơn timer, highlight ngay và hủy timer đó
+        // (chỉ override nếu gap hợp lý)
+        highlightWordAt(foundIdx);
+    };
+
+    currentUtterance = utterance;
+    readingStartIdx = startIdx;
+    window.speechSynthesis.speak(utterance);
+}
+
+function startTimer(totalMs, offsetMs) {
+    if (timerInterval) clearInterval(timerInterval);
+    document.getElementById("total-time").innerText = formatTimeMs(totalMs);
+    startTime = Date.now() - offsetMs;
+
+    timerInterval = setInterval(() => {
+        if (isPaused) return;
+        const elapsed = Date.now() - startTime;
+        document.getElementById("current-time").innerText = formatTimeMs(Math.min(elapsed, totalMs));
+    }, 200);
+}
+
+function formatTimeMs(ms) {
+    const sec = Math.floor(ms / 1000);
+    return `${Math.floor(sec / 60)}:${(sec % 60).toString().padStart(2, '0')}`;
+}
+
+function togglePauseResume() {
+    if (!currentUtterance) return;
+    if (!isPaused) {
+        // Ghi lại thời điểm pause
+        pausedAtMs = Date.now() - startTime;
+        clearHighlightTimers();
+        window.speechSynthesis.pause();
+        document.getElementById("pause-text").innerText = "TIẾP TỤC";
+        document.getElementById("pause-icon").className = "fa-solid fa-play";
+        isPaused = true;
+    } else {
+        // Resume: tính lại startTime để timer tiếp tục đúng
+        // Vì Web Speech resume không fire onboundary trở lại đúng,
+        // tốt nhất là tìm từ đang ở theo pausedAtMs rồi startReadingFrom lại
+        isPaused = false;
+        // Tìm từ gần nhất với vị trí pause
+        const resumeIdx = findWordIndexAtTime(pausedAtMs);
+        startReadingFrom(resumeIdx);
+    }
+}
+
+function findWordIndexAtTime(ms) {
+    if (!wordStartTimes || wordStartTimes.length === 0) return 0;
+    for (let i = wordStartTimes.length - 1; i >= 0; i--) {
+        if (wordStartTimes[i] <= ms) return i;
+    }
+    return 0;
+}
+
+function seekTo(val) {
+    if (currentReadingIndex === null || !currentWordsQueue || currentWordsQueue.length === 0) return;
+    // val = 0..100 → tìm từ theo % thời gian
+    const targetMs = (val / 100) * totalDurationMs;
+    const idx = findWordIndexAtTime(targetMs);
+    startReadingFrom(idx);
+}
+
+// ============================================================
+// TỰ ĐỘNG PHÁT ÂM SAU KHI DỊCH & LƯU
+// ============================================================
+function autoSpeakEnglishText(englishHtml) {
+    if (!('speechSynthesis' in window)) return;
+    const temp = document.createElement("div");
+    temp.innerHTML = englishHtml;
+    const plainText = temp.innerText || temp.textContent || "";
+    if (!plainText.trim()) return;
+
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(plainText.trim());
+    const selectedVoiceName = document.getElementById("voice-select")?.value;
+    if (selectedVoiceName && systemVoices && systemVoices.length > 0) {
+        const matched = systemVoices.find(v => v.name === selectedVoiceName);
+        if (matched) utterance.voice = matched;
+    }
+    const speed = parseFloat(document.getElementById("speed-slider")?.value) || 1.0;
+    utterance.rate = speed;
+    utterance.lang = "en-US";
+    window.speechSynthesis.speak(utterance);
+}
+
+// ============================================================
+// API CALLS
+// ============================================================
+async function translateAndSave() {
+    const inputVal = document.getElementById("text-input").innerHTML.trim();
+    if (!inputVal) return;
+    try {
+        const resp = await authFetch("/api/translate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username: viewingUsername, password: currentPassword, text: inputVal })
+        });
+        const data = await resp.json();
+        if (data.status === "success") {
+            learningLogs = data.updated_data;
+            renderLogs();
+            document.getElementById("text-input").innerHTML = "";
+
+            const autoSpeakChecked = document.getElementById("auto-speak")?.checked;
+            if (autoSpeakChecked && learningLogs.length > 0) {
+                const newestLog = learningLogs[learningLogs.length - 1];
+                if (newestLog && newestLog.en) {
+                    autoSpeakEnglishText(newestLog.en);
                 }
             }
-        } catch (error) { alert("Mất kết nối đồng bộ!"); }
-        
-        btn.innerText = "DỊCH & LƯU LÊN GITHUB";
-        btn.disabled = false;
-    }
+        }
+    } catch(e) { console.error(e); }
+}
 
-    async function deleteLog(index) {
-        if(!confirm("Xóa câu này khỏi kho lưu trữ GitHub của bạn?")) return;
-        try {
-            let res = await fetch('/api/delete-log', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username: currentUsername, index: index })
-            });
-            let result = await res.json();
-            if(result.status === "success") {
-                learningLog = result.data;
-                renderLogs();
-            }
-        } catch (e) { alert("Xóa dữ liệu thất bại!"); }
-    }
-
-    function renderLogs() {
-        const enContainer = document.getElementById('en-list-container');
-        const viContainer = document.getElementById('vi-list-container');
-        enContainer.innerHTML = ''; viContainer.innerHTML = '';
-
-        learningLog.forEach((item, index) => {
-            let enBox = document.createElement('div');
-            enBox.className = "p-3 bg-slate-50 rounded-lg border relative group";
-            enBox.innerHTML = `
-                <div class="text-gray-900 font-medium">${item.en}</div>
-                <div class="text-[10px] text-gray-400 mt-1">${item.date}</div>
-                <button onclick="deleteLog(${index})" class="absolute top-2 right-2 text-red-500 opacity-0 group-hover:opacity-100 transition"><i class="fa-solid fa-trash"></i></button>
-            `;
-            enContainer.appendChild(enBox);
-
-            let viBox = document.createElement('div');
-            viBox.className = "p-3 bg-emerald-50/50 rounded-lg border";
-            viBox.innerHTML = `<div class="text-gray-800">${item.vi}</div>`;
-            viContainer.appendChild(viBox);
+// ============================================================
+// VOICE & MISC
+// ============================================================
+function initVoiceSelection() {
+    const voiceSelect = document.getElementById("voice-select");
+    function populateVoices() {
+        systemVoices = window.speechSynthesis.getVoices();
+        if (!voiceSelect) return;
+        voiceSelect.innerHTML = "";
+        const enVoices = systemVoices.filter(v => v.lang.startsWith("en"));
+        if (enVoices.length === 0) { voiceSelect.innerHTML = '<option value="">Default Voice</option>'; return; }
+        enVoices.forEach(voice => {
+            const opt = document.createElement("option"); opt.value = voice.name;
+            opt.innerText = `${voice.name} (${voice.lang})`; voiceSelect.appendChild(opt);
         });
+        const def = enVoices.find(v => v.name.includes("Google US English") || v.name.includes("Natural"));
+        if (def) voiceSelect.value = def.name;
     }
+    populateVoices();
+    if (window.speechSynthesis.onvoiceschanged !== undefined) window.speechSynthesis.onvoiceschanged = populateVoices;
+}
+
+function formatDoc(command) { document.execCommand(command, false, null); document.getElementById("text-input").focus(); }
+
+function startVoiceRecord(langCode) {
+    const rec = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+    rec.lang = langCode; rec.start();
+    rec.onresult = e => { document.getElementById("text-input").innerHTML = e.results[0][0].transcript; };
+}
+
+function toggleAdminPanel() { document.getElementById("admin-panel").classList.toggle("hidden"); }
+
+function editSelectedSentence() {
+    if (selectedIndex !== null) {
+        document.getElementById("modal-en").innerHTML = learningLogs[selectedIndex].en;
+        document.getElementById("modal-vi").innerHTML = learningLogs[selectedIndex].vi;
+        document.getElementById("edit-modal").classList.remove("hidden");
+    }
+}
+
+function closeEditModal() { document.getElementById("edit-modal").classList.add("hidden"); }
+
+async function saveEditModal() {
+    const newEn = document.getElementById("modal-en").innerHTML;
+    const newVi = document.getElementById("modal-vi").innerHTML;
+    try {
+        const resp = await authFetch("/api/edit", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username: viewingUsername, password: currentPassword, index: selectedIndex, en: newEn, vi: newVi })
+        });
+        const data = await resp.json();
+        if (data.status === "success") { learningLogs = data.data; renderLogs(); closeEditModal(); }
+    } catch(e) { console.error(e); }
+}
+
+async function deleteSelectedSentence() {
+    if (selectedIndex === null || !confirm("Xóa câu học này?")) return;
+    try {
+        const resp = await authFetch("/api/delete", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ username: viewingUsername, password: currentPassword, index: selectedIndex })
+        });
+        const data = await resp.json();
+        if (data.status === "success") { learningLogs = data.data; selectedIndex = null; renderLogs(); }
+    } catch(e) { console.error(e); }
+}
 </script>
 </body>
 </html>
