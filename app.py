@@ -15,14 +15,19 @@ try:
 except ImportError:
     HAS_ENG_TO_IPA = False
 
-app = Flask(__name__)
+# SỬA LỖI "TemplateNotFound: index.html": mặc định Flask chỉ tìm file
+# HTML trong thư mục con 'templates/', nhưng 'index.html' của dự án này
+# lại nằm ngay tại thư mục gốc (cùng cấp với app.py) trên GitHub. Khai
+# báo rõ template_folder = thư mục chứa app.py để Flask tìm đúng chỗ,
+# không cần di chuyển file hay đổi cấu trúc repo.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+app = Flask(__name__, template_folder=BASE_DIR, static_folder=BASE_DIR)
 
 # ============================================================
 # CẤU HÌNH HỆ THỐNG
 # ============================================================
 SYSTEM_PASSWORD = "th@nh341978"   # Mật khẩu hệ thống chung (admin dùng khi đăng nhập lớp 1)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR  = os.path.join(BASE_DIR, 'userdata')
 USERS_FILE = os.path.join(DATA_DIR, '_users.json')   # Danh sách user con do admin tạo
 
