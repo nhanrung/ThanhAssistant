@@ -123,22 +123,23 @@ def _github_put_file(repo_path, text_content, commit_message,
     Ghi (tạo mới hoặc cập nhật) 1 file trong repo GitHub qua Contents API.
     Trả về True nếu thành công, False nếu thất bại.
 
-    Đã tối ưu cho payload lớn (vài chục KB) trên PythonAnywiwe free, nơi
-    proxy whitelist đôi khi làm hỏng/cắt cụt body của request PUT lớn:
-      - Serialize JSON tường minh thành bytes và điền sẵn header
-        "Content-Length" (thay vì để requests tự suy đoán/serialize
-        lại), giúp proxy nhận đúng độ dài body ngay từ đầu.
-      - Tăng timeout (mặc định 30s thay vì 10s) để không bị ngắt kết
-        nối giữa chừng khi upload chậm.
-      - Tự động thử lại tối đa `max_retries` lần (có backoff tăng dần)
-        nếu gặp lỗi nghi do mạng/proxy (mất kết nối, timeout, response
-        bị cắt cụt giữa chừng). Lỗi 4xx (trừ 409 đã có xử lý riêng)
-        không được thử lại vì đó là lỗi logic, không phải lỗi mạng.
+    LỊCH SỬ SỬA LỖI (quan trọng, đọc trước khi sửa lại hàm này):
+    Bản trước đây từng CHỦ ĐỘNG tự tính và ép cứng header "Content-Length"
+    (serialize JSON thủ công thành bytes rồi gửi qua data=...). Ý định là
+    để "an toàn" cho payload lớn, nhưng trên thực tế lại gây ra lỗi MỚI và
+    NẶNG HƠN: GitHub trả về "400 - malformed request" ngay cả với file nhỏ
+    (ví dụ learning_log_thanh.json) — nhiều khả năng do proxy whitelist
+    của PythonAnywiwe free rewrap lại request khi chuyển tiếp, khiến số
+    byte thực nhận được lệch với Content-Length đã khai báo cứng, khiến
+    GitHub từ chối thẳng request thay vì chỉ timeout âm thầm như trước.
+    -> ĐÃ QUAY LẠI dùng json=payload để để "requests" tự lo toàn bộ việc
+    serialize + tính Content-Length (đáng tin cậy hơn khi đi qua proxy),
+    chỉ giữ lại phần tăng timeout + cơ chế thử lại.
     """
     url = f"{GITHUB_API_BASE}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{repo_path}"
     b64_content = base64.b64encode(text_content.encode("utf-8")).decode("utf-8")
 
-    def _build_body(sha):
+    def _attempt(sha):
         payload = {
             "message": commit_message,
             "content": b64_content,
@@ -146,19 +147,10 @@ def _github_put_file(repo_path, text_content, commit_message,
         }
         if sha:
             payload["sha"] = sha
-        # Serialize tường minh -> biết chính xác độ dài body để điền
-        # Content-Length, tránh phụ thuộc vào cách requests tự đoán.
-        body_bytes = json.dumps(payload).encode("utf-8")
         headers = _github_headers()
-        headers["Content-Type"] = "application/json"
-        headers["Content-Length"] = str(len(body_bytes))
-        return body_bytes, headers
-
-    def _attempt(sha):
-        body_bytes, headers = _build_body(sha)
-        # data=body_bytes (không dùng json=...) để gửi đúng y hệt bytes
-        # đã tính Content-Length ở trên, không bị requests serialize lại.
-        return requests.put(url, headers=headers, data=body_bytes, timeout=timeout)
+        # Không tự set Content-Type/Content-Length thủ công -> để
+        # requests tự tính chính xác theo đúng bytes thật sự gửi đi.
+        return requests.put(url, headers=headers, json=payload, timeout=timeout)
 
     last_network_error = None
     try:
