@@ -5,6 +5,8 @@ import html as html_lib
 import base64
 import requests
 import time
+import subprocess
+import tempfile
 import pytz
 import urllib.parse
 from datetime import datetime
@@ -124,22 +126,33 @@ def _github_put_file(repo_path, text_content, commit_message,
     Trả về True nếu thành công, False nếu thất bại.
 
     LỊCH SỬ SỬA LỖI (quan trọng, đọc trước khi sửa lại hàm này):
-    Bản trước đây từng CHỦ ĐỘNG tự tính và ép cứng header "Content-Length"
-    (serialize JSON thủ công thành bytes rồi gửi qua data=...). Ý định là
-    để "an toàn" cho payload lớn, nhưng trên thực tế lại gây ra lỗi MỚI và
-    NẶNG HƠN: GitHub trả về "400 - malformed request" ngay cả với file nhỏ
-    (ví dụ learning_log_thanh.json) — nhiều khả năng do proxy whitelist
-    của PythonAnywiwe free rewrap lại request khi chuyển tiếp, khiến số
-    byte thực nhận được lệch với Content-Length đã khai báo cứng, khiến
-    GitHub từ chối thẳng request thay vì chỉ timeout âm thầm như trước.
-    -> ĐÃ QUAY LẠI dùng json=payload để để "requests" tự lo toàn bộ việc
-    serialize + tính Content-Length (đáng tin cậy hơn khi đi qua proxy),
-    chỉ giữ lại phần tăng timeout + cơ chế thử lại.
+    - Bản đầu tiên dùng requests.put(..., timeout=10) đơn giản -> với file
+      lớn, hay bị "OSError: write error" (timeout/mất kết nối âm thầm).
+    - Bản thứ hai thử tự ép cứng header Content-Length -> gây lỗi MỚI:
+      GitHub trả "400 - malformed request" ngay cả với file không quá
+      lớn.
+    - Bản thứ ba quay về requests.put(..., json=payload) (để requests tự
+      lo hết) -> VẪN bị lỗi 400 y hệt với file ~750KB (learning_log_thanh
+      .json), trong khi curl gửi CHÍNH XÁC cùng nội dung đó qua dòng lệnh
+      lại THÀNH CÔNG (200 OK). Điều này CHỨNG MINH bằng thực nghiệm rằng
+      lỗi không phải do kích thước hay do proxy hạ tầng, mà do cách thư
+      viện `requests`/urllib3 dựng request PUT thân lớn trong môi trường
+      PythonAnywiwe free cụ thể này (rất có thể liên quan cách nó xử lý
+      kết nối/khung dữ liệu khi đi qua proxy whitelist của họ).
+    -> GIẢI PHÁP CUỐI: gọi thẳng lệnh `curl` (đã được xác nhận hoạt động
+      ổn định với file ~775KB) thông qua subprocess, thay vì dùng thư
+      viện `requests` cho riêng thao tác PUT này. Việc đọc file (GET) vẫn
+      dùng `requests` như cũ vì chưa từng gặp lỗi.
     """
     url = f"{GITHUB_API_BASE}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{repo_path}"
     b64_content = base64.b64encode(text_content.encode("utf-8")).decode("utf-8")
 
     def _attempt(sha):
+        """
+        Gửi 1 lần PUT qua curl (subprocess). Trả về (status_code:int,
+        body_text:str). status_code = 0 nếu curl tự thân thất bại (mất
+        mạng, timeout...) trước khi có phản hồi HTTP nào.
+        """
         payload = {
             "message": commit_message,
             "content": b64_content,
@@ -147,10 +160,59 @@ def _github_put_file(repo_path, text_content, commit_message,
         }
         if sha:
             payload["sha"] = sha
-        headers = _github_headers()
-        # Không tự set Content-Type/Content-Length thủ công -> để
-        # requests tự tính chính xác theo đúng bytes thật sự gửi đi.
-        return requests.put(url, headers=headers, json=payload, timeout=timeout)
+
+        payload_file = None
+        output_file = None
+        try:
+            # Ghi payload ra file tạm (an toàn hơn truyền qua dòng lệnh
+            # với payload lớn/ký tự đặc biệt) rồi trỏ curl đọc bằng @file.
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".json", delete=False, encoding="utf-8"
+            ) as pf:
+                json.dump(payload, pf, ensure_ascii=True)
+                payload_file = pf.name
+
+            out_fd, output_file = tempfile.mkstemp(suffix=".json")
+            os.close(out_fd)
+
+            cmd = [
+                "curl", "-s", "-X", "PUT",
+                "-H", f"Authorization: Bearer {GITHUB_TOKEN}",
+                "-H", "Accept: application/vnd.github+json",
+                "-H", "Content-Type: application/json",
+                "-H", "X-GitHub-Api-Version: 2022-11-28",
+                url,
+                "-d", f"@{payload_file}",
+                "-o", output_file,
+                "-w", "%{http_code}",
+                "--max-time", str(timeout),
+            ]
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout + 15
+            )
+
+            status_str = (result.stdout or "").strip()
+            status_code = int(status_str) if status_str.isdigit() else 0
+
+            body_text = ""
+            if output_file and os.path.exists(output_file):
+                with open(output_file, "r", encoding="utf-8", errors="replace") as of:
+                    body_text = of.read()
+
+            if status_code == 0:
+                # curl không lấy được HTTP status hợp lệ -> coi là lỗi
+                # mạng để tầng gọi quyết định thử lại.
+                err_detail = (result.stderr or body_text or "không rõ nguyên nhân")[:300]
+                raise ConnectionError(f"curl thất bại: {err_detail}")
+
+            return status_code, body_text
+        finally:
+            for f in (payload_file, output_file):
+                if f and os.path.exists(f):
+                    try:
+                        os.remove(f)
+                    except Exception:
+                        pass
 
     last_network_error = None
     try:
@@ -158,11 +220,9 @@ def _github_put_file(repo_path, text_content, commit_message,
 
         for attempt in range(1, max_retries + 1):
             try:
-                resp = _attempt(cached_sha)
-            except (requests.exceptions.ConnectionError,
-                    requests.exceptions.Timeout,
-                    requests.exceptions.ChunkedEncodingError) as e:
-                # Lỗi nghi do mạng/proxy cắt cụt request -> thử lại.
+                status_code, body_text = _attempt(cached_sha)
+            except (subprocess.TimeoutExpired, ConnectionError) as e:
+                # Lỗi nghi do mạng/proxy -> thử lại.
                 last_network_error = e
                 print(f"GitHub PUT '{repo_path}' lỗi mạng (lần {attempt}/{max_retries}): {e}")
                 if attempt < max_retries:
@@ -173,14 +233,12 @@ def _github_put_file(repo_path, text_content, commit_message,
 
             # sha lưu trong bộ nhớ đệm bị cũ (file đã đổi trên GitHub từ
             # nơi khác) -> đọc lại sha mới nhất rồi thử ghi lại.
-            if resp.status_code == 409:
+            if status_code == 409:
                 existing = _github_get_file(repo_path)
                 cached_sha = existing["sha"] if existing else None
                 try:
-                    resp = _attempt(cached_sha)
-                except (requests.exceptions.ConnectionError,
-                        requests.exceptions.Timeout,
-                        requests.exceptions.ChunkedEncodingError) as e:
+                    status_code, body_text = _attempt(cached_sha)
+                except (subprocess.TimeoutExpired, ConnectionError) as e:
                     last_network_error = e
                     print(f"GitHub PUT '{repo_path}' lỗi mạng sau khi làm mới sha (lần {attempt}/{max_retries}): {e}")
                     if attempt < max_retries:
@@ -188,15 +246,18 @@ def _github_put_file(repo_path, text_content, commit_message,
                         continue
                     return False
 
-            if resp.status_code in (200, 201):
-                new_sha = (resp.json().get("content") or {}).get("sha")
-                if new_sha:
-                    _GITHUB_SHA_CACHE[repo_path] = new_sha
+            if status_code in (200, 201):
+                try:
+                    new_sha = (json.loads(body_text).get("content") or {}).get("sha")
+                    if new_sha:
+                        _GITHUB_SHA_CACHE[repo_path] = new_sha
+                except Exception:
+                    pass
                 return True
 
             # 5xx (lỗi tạm thời phía GitHub/proxy) -> đáng để thử lại.
-            if 500 <= resp.status_code < 600:
-                print(f"GitHub PUT '{repo_path}' lỗi {resp.status_code} (lần {attempt}/{max_retries}): {resp.text[:300]}")
+            if 500 <= status_code < 600:
+                print(f"GitHub PUT '{repo_path}' lỗi {status_code} (lần {attempt}/{max_retries}): {body_text[:300]}")
                 if attempt < max_retries:
                     time.sleep(2 ** (attempt - 1))
                     continue
@@ -204,7 +265,7 @@ def _github_put_file(repo_path, text_content, commit_message,
 
             # Lỗi 4xx còn lại (sai token, payload không hợp lệ...) -> lỗi
             # logic, retry thêm cũng vô ích, dừng ngay.
-            print(f"GitHub PUT '{repo_path}' lỗi {resp.status_code}: {resp.text[:300]}")
+            print(f"GitHub PUT '{repo_path}' lỗi {status_code}: {body_text[:300]}")
             return False
 
         return False
@@ -240,7 +301,7 @@ if not _github_storage_configured():
 # model sắp bị deprecate.
 #
 # Nên đặt các API KEY qua biến môi trường khi có thể, thay vì hard-code.
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6JZDbwVabCT_ytfCnwNWRGUnh47K9XZjrHpC5Cv7i-e7A")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6IFc6oXzX0QEpZU5D-hpkEEUnpuhttIW24wopkYjVX19A")
 GEMINI_TRANSLATE_MODEL = "gemini-2.5-flash"
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_TRANSLATE_MODEL}:generateContent"
 
