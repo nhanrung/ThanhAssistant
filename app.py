@@ -4,6 +4,7 @@ import re
 import html as html_lib
 import base64
 import requests
+import time
 import pytz
 import urllib.parse
 from datetime import datetime
@@ -15,19 +16,14 @@ try:
 except ImportError:
     HAS_ENG_TO_IPA = False
 
-# SỬA LỖI "TemplateNotFound: index.html": mặc định Flask chỉ tìm file
-# HTML trong thư mục con 'templates/', nhưng 'index.html' của dự án này
-# lại nằm ngay tại thư mục gốc (cùng cấp với app.py) trên GitHub. Khai
-# báo rõ template_folder = thư mục chứa app.py để Flask tìm đúng chỗ,
-# không cần di chuyển file hay đổi cấu trúc repo.
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-app = Flask(__name__, template_folder=BASE_DIR, static_folder=BASE_DIR)
+app = Flask(__name__)
 
 # ============================================================
 # CẤU HÌNH HỆ THỐNG
 # ============================================================
 SYSTEM_PASSWORD = "th@nh341978"   # Mật khẩu hệ thống chung (admin dùng khi đăng nhập lớp 1)
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR  = os.path.join(BASE_DIR, 'userdata')
 USERS_FILE = os.path.join(DATA_DIR, '_users.json')   # Danh sách user con do admin tạo
 
@@ -121,15 +117,28 @@ def _github_get_file(repo_path):
         return None
 
 
-def _github_put_file(repo_path, text_content, commit_message):
+def _github_put_file(repo_path, text_content, commit_message,
+                      max_retries=3, timeout=30):
     """
     Ghi (tạo mới hoặc cập nhật) 1 file trong repo GitHub qua Contents API.
     Trả về True nếu thành công, False nếu thất bại.
+
+    Đã tối ưu cho payload lớn (vài chục KB) trên PythonAnywiwe free, nơi
+    proxy whitelist đôi khi làm hỏng/cắt cụt body của request PUT lớn:
+      - Serialize JSON tường minh thành bytes và điền sẵn header
+        "Content-Length" (thay vì để requests tự suy đoán/serialize
+        lại), giúp proxy nhận đúng độ dài body ngay từ đầu.
+      - Tăng timeout (mặc định 30s thay vì 10s) để không bị ngắt kết
+        nối giữa chừng khi upload chậm.
+      - Tự động thử lại tối đa `max_retries` lần (có backoff tăng dần)
+        nếu gặp lỗi nghi do mạng/proxy (mất kết nối, timeout, response
+        bị cắt cụt giữa chừng). Lỗi 4xx (trừ 409 đã có xử lý riêng)
+        không được thử lại vì đó là lỗi logic, không phải lỗi mạng.
     """
     url = f"{GITHUB_API_BASE}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{repo_path}"
     b64_content = base64.b64encode(text_content.encode("utf-8")).decode("utf-8")
 
-    def _attempt(sha):
+    def _build_body(sha):
         payload = {
             "message": commit_message,
             "content": b64_content,
@@ -137,26 +146,75 @@ def _github_put_file(repo_path, text_content, commit_message):
         }
         if sha:
             payload["sha"] = sha
-        return requests.put(url, headers=_github_headers(), json=payload, timeout=10)
+        # Serialize tường minh -> biết chính xác độ dài body để điền
+        # Content-Length, tránh phụ thuộc vào cách requests tự đoán.
+        body_bytes = json.dumps(payload).encode("utf-8")
+        headers = _github_headers()
+        headers["Content-Type"] = "application/json"
+        headers["Content-Length"] = str(len(body_bytes))
+        return body_bytes, headers
 
+    def _attempt(sha):
+        body_bytes, headers = _build_body(sha)
+        # data=body_bytes (không dùng json=...) để gửi đúng y hệt bytes
+        # đã tính Content-Length ở trên, không bị requests serialize lại.
+        return requests.put(url, headers=headers, data=body_bytes, timeout=timeout)
+
+    last_network_error = None
     try:
         cached_sha = _GITHUB_SHA_CACHE.get(repo_path)
-        resp = _attempt(cached_sha)
 
-        # sha lưu trong bộ nhớ đệm bị cũ (file đã đổi trên GitHub từ nơi
-        # khác) -> đọc lại sha mới nhất rồi thử ghi lại 1 lần nữa.
-        if resp.status_code == 409:
-            existing = _github_get_file(repo_path)
-            fresh_sha = existing["sha"] if existing else None
-            resp = _attempt(fresh_sha)
+        for attempt in range(1, max_retries + 1):
+            try:
+                resp = _attempt(cached_sha)
+            except (requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout,
+                    requests.exceptions.ChunkedEncodingError) as e:
+                # Lỗi nghi do mạng/proxy cắt cụt request -> thử lại.
+                last_network_error = e
+                print(f"GitHub PUT '{repo_path}' lỗi mạng (lần {attempt}/{max_retries}): {e}")
+                if attempt < max_retries:
+                    time.sleep(2 ** (attempt - 1))  # backoff: 1s, 2s, 4s...
+                    continue
+                print(f"GitHub PUT '{repo_path}' thất bại sau {max_retries} lần thử do lỗi mạng.")
+                return False
 
-        if resp.status_code in (200, 201):
-            new_sha = (resp.json().get("content") or {}).get("sha")
-            if new_sha:
-                _GITHUB_SHA_CACHE[repo_path] = new_sha
-            return True
+            # sha lưu trong bộ nhớ đệm bị cũ (file đã đổi trên GitHub từ
+            # nơi khác) -> đọc lại sha mới nhất rồi thử ghi lại.
+            if resp.status_code == 409:
+                existing = _github_get_file(repo_path)
+                cached_sha = existing["sha"] if existing else None
+                try:
+                    resp = _attempt(cached_sha)
+                except (requests.exceptions.ConnectionError,
+                        requests.exceptions.Timeout,
+                        requests.exceptions.ChunkedEncodingError) as e:
+                    last_network_error = e
+                    print(f"GitHub PUT '{repo_path}' lỗi mạng sau khi làm mới sha (lần {attempt}/{max_retries}): {e}")
+                    if attempt < max_retries:
+                        time.sleep(2 ** (attempt - 1))
+                        continue
+                    return False
 
-        print(f"GitHub PUT '{repo_path}' lỗi {resp.status_code}: {resp.text[:300]}")
+            if resp.status_code in (200, 201):
+                new_sha = (resp.json().get("content") or {}).get("sha")
+                if new_sha:
+                    _GITHUB_SHA_CACHE[repo_path] = new_sha
+                return True
+
+            # 5xx (lỗi tạm thời phía GitHub/proxy) -> đáng để thử lại.
+            if 500 <= resp.status_code < 600:
+                print(f"GitHub PUT '{repo_path}' lỗi {resp.status_code} (lần {attempt}/{max_retries}): {resp.text[:300]}")
+                if attempt < max_retries:
+                    time.sleep(2 ** (attempt - 1))
+                    continue
+                return False
+
+            # Lỗi 4xx còn lại (sai token, payload không hợp lệ...) -> lỗi
+            # logic, retry thêm cũng vô ích, dừng ngay.
+            print(f"GitHub PUT '{repo_path}' lỗi {resp.status_code}: {resp.text[:300]}")
+            return False
+
         return False
     except Exception as e:
         print(f"Lỗi gọi GitHub PUT '{repo_path}': {str(e)}")
