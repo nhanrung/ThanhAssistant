@@ -377,7 +377,7 @@ async function createUser() {
         const resp = await authFetch("/api/admin/create_user", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ admin_password: currentPassword, username, password })
+            body: JSON.stringify({ password: currentPassword, new_username: username, new_password: password })
         });
         const data = await resp.json();
         if (data.status === "success") {
@@ -394,7 +394,7 @@ async function deleteUser(username) {
         const resp = await authFetch("/api/admin/delete_user", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ admin_password: currentPassword, username })
+            body: JSON.stringify({ password: currentPassword, target_username: username })
         });
         const data = await resp.json();
         if (data.status === "success") { await loadSubUsers(); }
