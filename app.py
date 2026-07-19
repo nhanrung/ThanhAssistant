@@ -301,7 +301,7 @@ if not _github_storage_configured():
 # model sắp bị deprecate.
 #
 # Nên đặt các API KEY qua biến môi trường khi có thể, thay vì hard-code.
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6IFc6oXzX0QEpZU5D-hpkEEUnpuhttIW24wopkYjVX19A")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6JZDbwVabCT_ytfCnwNWRGUnh47K9XZjrHpC5Cv7i-e7A")
 GEMINI_TRANSLATE_MODEL = "gemini-2.5-flash"
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_TRANSLATE_MODEL}:generateContent"
 
