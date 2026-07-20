@@ -7,6 +7,7 @@ import requests
 import time
 import subprocess
 import tempfile
+import threading
 import pytz
 import urllib.parse
 from datetime import datetime
@@ -382,17 +383,46 @@ _OVERLOAD_STATUS_CODES = {429, 500, 502, 503, 504}
 _DEAD_KEY_STATUS_CODES = {401, 403}
 
 # NGÂN SÁCH THỜI GIAN TỔNG (chống lỗi "WORKER TIMEOUT" trên Render/gunicorn):
-# Gunicorn mặc định giết worker nếu 1 request xử lý quá 30 giây. Trước đây
-# code thử LẦN LƯỢT 3 key Gemini x 20s + 3 key Groq x 20s = có thể tới 120
-# giây -> gunicorn giết worker giữa chừng -> MẤT TRẮNG toàn bộ bản dịch dù
-# đã tính xong. Nay giới hạn: mỗi lần gọi API tối đa TIMEOUT_PER_CALL giây,
-# và TOÀN BỘ chuỗi Gemini+Groq không được vượt quá AI_TOTAL_TIME_BUDGET giây
-# -> hết ngân sách thì dừng thử key/tầng tiếp theo, rơi thẳng xuống Google
-# Translate (luôn nhanh) thay vì để gunicorn giết worker.
-TIMEOUT_PER_CALL = 10          # giây, timeout cho MỖI lần gọi Gemini/Groq
-AI_TOTAL_TIME_BUDGET = 22      # giây, tổng thời gian tối đa cho cả Gemini+Groq
-                                # (chừa dư ít nhất 8s trước khi gunicorn (30s)
-                                # can thiệp, cộng thời gian Google Translate)
+# Gunicorn mặc định giết worker nếu 1 request xử lý quá X giây (đã tăng lên
+# 60s qua --timeout 60, xem hướng dẫn Start Command). Một đoạn văn dài bị
+# TỰ ĐỘNG CHIA thành nhiều "chunk" nhỏ (theo dòng, rồi theo câu) và dịch
+# TUẦN TỰ từng chunk — nếu mỗi chunk tự cấp lại ngân sách 22s riêng, tổng
+# thời gian cả request cộng dồn RẤT NHANH vượt quá giới hạn của gunicorn.
+# -> Giải pháp: dùng 1 "deadline" DÙNG CHUNG cho TOÀN BỘ request (mọi
+# chunk), lưu trong biến thread-local (mỗi request 1 giá trị riêng, an
+# toàn khi có nhiều worker/thread). Route /api/translate gọi
+# `_start_request_ai_deadline()` ngay khi bắt đầu xử lý; mọi lệnh gọi
+# Gemini/Groq bên trong request đó tự động dùng chung deadline này. Hễ hết
+# ngân sách, các chunk còn lại BỎ QUA thẳng Gemini/Groq, dùng Google
+# Translate (luôn nhanh, vài giây) để đảm bảo tổng thời gian không bao giờ
+# vượt quá giới hạn gunicorn.
+TIMEOUT_PER_CALL = 8            # giây, timeout cho MỖI lần gọi Gemini/Groq
+AI_TOTAL_TIME_BUDGET = 35       # giây, tổng thời gian tối đa cho TOÀN BỘ
+                                 # request (mọi chunk cộng lại), chừa dư
+                                 # >20s cho các lệnh gọi Google Translate
+                                 # dự phòng + xử lý khác trước khi chạm
+                                 # ngưỡng 60s của gunicorn.
+
+_ai_deadline_local = threading.local()
+
+
+def _start_request_ai_deadline():
+    """Gọi 1 LẦN DUY NHẤT ở đầu mỗi route xử lý dịch thuật (vd api_translate)
+    để mở 1 ngân sách thời gian MỚI, dùng chung cho toàn bộ request đó
+    (bất kể request được chia thành bao nhiêu chunk nhỏ bên trong)."""
+    _ai_deadline_local.value = time.time() + AI_TOTAL_TIME_BUDGET
+
+
+def _get_request_ai_deadline():
+    """Lấy deadline dùng chung của request hiện tại. Nếu chưa có route nào
+    khởi tạo (vd gọi hàm dịch ngoài ngữ cảnh HTTP request, hoặc quên gọi
+    _start_request_ai_deadline), tự tạo 1 ngân sách MỚI để hàm gọi vẫn
+    hoạt động an toàn (không None -> không giới hạn thời gian)."""
+    deadline = getattr(_ai_deadline_local, "value", None)
+    if deadline is None:
+        deadline = time.time() + AI_TOTAL_TIME_BUDGET
+        _ai_deadline_local.value = deadline
+    return deadline
 
 # ============================================================
 # QUẢN LÝ DANH SÁCH USER CON
@@ -983,8 +1013,13 @@ def _call_gemini_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3,
             else:
                 print(f"Gemini API ({key_label}) lỗi {resp.status_code}: {resp.text[:300]}")
         except requests.exceptions.Timeout:
-            print(f"Gemini API ({key_label}) timeout -> thử key kế tiếp...")
-            continue
+            # Timeout THẬT (server không phản hồi kịp) thường là do sự cố
+            # kết nối/mạng tới CHÍNH dịch vụ đó (không riêng gì 1 key) ->
+            # thử thêm key khác của CÙNG Gemini thường cũng sẽ timeout y
+            # hệt, chỉ tổ tốn thêm hàng chục giây. Dừng NGAY toàn bộ vòng
+            # xoay key Gemini, chuyển thẳng sang Groq (server khác hẳn).
+            print(f"Gemini API ({key_label}) timeout -> bỏ qua các key Gemini còn lại, chuyển thẳng sang Groq AI...")
+            break
         except Exception as e:
             print(f"Lỗi gọi Gemini API ({key_label}): {str(e)}")
             continue
@@ -1055,8 +1090,8 @@ def _call_groq_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3, d
             else:
                 print(f"Groq API ({key_label}) lỗi {resp.status_code}: {resp.text[:300]}")
         except requests.exceptions.Timeout:
-            print(f"Groq API ({key_label}) timeout -> thử key kế tiếp...")
-            continue
+            print(f"Groq API ({key_label}) timeout -> bỏ qua các key Groq còn lại, chuyển thẳng sang Google Translate...")
+            break
         except Exception as e:
             print(f"Lỗi gọi Groq API ({key_label}): {str(e)}")
             continue
@@ -1073,12 +1108,13 @@ def _call_ai_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3):
     ngân sách thời gian chung), hàm gọi cần tự rơi về Google Translate
     (free_translate / _translate_plain đã có sẵn logic này).
 
-    Toàn bộ chuỗi Gemini+Groq dùng CHUNG 1 deadline (AI_TOTAL_TIME_BUDGET
-    giây tính từ lúc bắt đầu) để không bao giờ vượt quá thời gian gunicorn
-    cho phép xử lý 1 request -> tránh lỗi "WORKER TIMEOUT" làm mất trắng
-    bản dịch.
+    QUAN TRỌNG: dùng deadline DÙNG CHUNG CHO CẢ REQUEST (không phải riêng
+    cho lệnh gọi này) — xem _get_request_ai_deadline(). Nhờ vậy dù 1 đoạn
+    văn dài bị chia thành hàng chục chunk nhỏ, dịch tuần tự, TỔNG thời
+    gian dành cho Gemini+Groq trên toàn bộ request vẫn không bao giờ vượt
+    quá AI_TOTAL_TIME_BUDGET giây -> không còn nguy cơ "WORKER TIMEOUT".
     """
-    deadline = time.time() + AI_TOTAL_TIME_BUDGET
+    deadline = _get_request_ai_deadline()
 
     translated = _call_gemini_chat(system_prompt, user_msg, max_tokens=max_tokens,
                                     temperature=temperature, deadline=deadline)
@@ -1969,6 +2005,11 @@ def api_load_log():
 
 @app.route('/api/translate', methods=['POST'])
 def api_translate():
+    # Mở ngân sách thời gian DÙNG CHUNG cho toàn bộ request này (mọi
+    # chunk/dòng/câu bên trong text đều dùng chung deadline này) -> xem
+    # ghi chú chi tiết tại _start_request_ai_deadline() / AI_TOTAL_TIME_BUDGET.
+    _start_request_ai_deadline()
+
     req_data = request.get_json()
     if not verify_request_password(req_data):
         return jsonify({"status": "error", "message": "Truy cập trái phép!"}), 401
