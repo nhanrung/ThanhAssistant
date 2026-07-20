@@ -10,6 +10,7 @@ import tempfile
 import threading
 import pytz
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template
 
@@ -396,7 +397,13 @@ _DEAD_KEY_STATUS_CODES = {401, 403}
 # ngân sách, các chunk còn lại BỎ QUA thẳng Gemini/Groq, dùng Google
 # Translate (luôn nhanh, vài giây) để đảm bảo tổng thời gian không bao giờ
 # vượt quá giới hạn gunicorn.
-TIMEOUT_PER_CALL = 8            # giây, timeout cho MỖI lần gọi Gemini/Groq
+TIMEOUT_PER_CALL = 4            # giây, timeout cho MỖI lần gọi Gemini/Groq
+                                 # (siết chặt xuống 3.5-5s thay vì 8s cũ —
+                                 # mục tiêu: 1 lần gọi bị treo/nghẽn không
+                                 # bao giờ được phép "ngốn" quá nhiều ngân
+                                 # sách thời gian chung của request, để tổng
+                                 # độ trễ cộng dồn không bao giờ chạm ngưỡng
+                                 # WORKER TIMEOUT của Gunicorn/uWSGI).
 AI_TOTAL_TIME_BUDGET = 35       # giây, tổng thời gian tối đa cho TOÀN BỘ
                                  # request (mọi chunk cộng lại), chừa dư
                                  # >20s cho các lệnh gọi Google Translate
@@ -411,6 +418,7 @@ def _start_request_ai_deadline():
     để mở 1 ngân sách thời gian MỚI, dùng chung cho toàn bộ request đó
     (bất kể request được chia thành bao nhiêu chunk nhỏ bên trong)."""
     _ai_deadline_local.value = time.time() + AI_TOTAL_TIME_BUDGET
+    _start_request_circuit_breaker()
 
 
 def _get_request_ai_deadline():
@@ -423,6 +431,77 @@ def _get_request_ai_deadline():
         deadline = time.time() + AI_TOTAL_TIME_BUDGET
         _ai_deadline_local.value = deadline
     return deadline
+
+
+# ------------------------------------------------------------
+# CIRCUIT BREAKER (ngắt mạch theo từng request)
+# ------------------------------------------------------------
+# VẤN ĐỀ: trước đây, dù 1 provider (Gemini/Groq) đang bị nghẽn/rớt mạng,
+# hệ thống vẫn tiếp tục "thử lại" provider đó ở MỌI chunk tiếp theo của
+# cùng 1 request -> mỗi lần thử lại lại tốn thêm vài giây timeout, cộng
+# dồn qua hàng chục chunk là nguyên nhân chính gây WORKER TIMEOUT.
+#
+# GIẢI PHÁP: mỗi request có 1 bộ đếm lỗi LIÊN TIẾP riêng (thread-local,
+# giống _ai_deadline_local) cho từng provider. Chỉ tính là "lỗi" theo đúng
+# yêu cầu: Timeout hoặc HTTP 429. Hễ 1 provider bị lỗi liên tiếp đủ
+# CIRCUIT_BREAKER_THRESHOLD lần, mạch của provider đó bị "ngắt" (tripped)
+# cho đến hết request hiện tại -> MỌI chunk còn lại tự động BỎ QUA hẳn
+# provider đó (không thử lại nữa, không tốn thêm 1 giây timeout nào),
+# rơi thẳng xuống tầng dự phòng kế tiếp (Groq, rồi Google Translate).
+CIRCUIT_BREAKER_THRESHOLD = 2   # số lỗi Timeout/429 LIÊN TIẾP để ngắt mạch
+
+_circuit_breaker_local = threading.local()
+
+
+def _start_request_circuit_breaker():
+    """Mở lại bộ đếm circuit breaker SẠCH cho 1 request mới (gọi cùng lúc
+    với _start_request_ai_deadline)."""
+    _circuit_breaker_local.state = {
+        "gemini": {"consecutive_fails": 0, "tripped": False},
+        "groq":   {"consecutive_fails": 0, "tripped": False},
+    }
+
+
+def _get_circuit_breaker_state():
+    state = getattr(_circuit_breaker_local, "state", None)
+    if state is None:
+        state = {
+            "gemini": {"consecutive_fails": 0, "tripped": False},
+            "groq":   {"consecutive_fails": 0, "tripped": False},
+        }
+        _circuit_breaker_local.state = state
+    return state
+
+
+def _cb_is_tripped(provider):
+    """True nếu provider ('gemini'/'groq') đã bị ngắt mạch cho request
+    hiện tại -> hàm gọi PHẢI bỏ qua hẳn provider này, không thử nữa."""
+    return _get_circuit_breaker_state()[provider]["tripped"]
+
+
+def _cb_record_failure(provider):
+    """Ghi nhận 1 lỗi Timeout/429 của provider. Trả về True nếu lần ghi
+    nhận này vừa làm mạch bị NGẮT (để hàm gọi dừng thử các key còn lại
+    ngay lập tức thay vì tốn thêm thời gian)."""
+    st = _get_circuit_breaker_state()[provider]
+    st["consecutive_fails"] += 1
+    just_tripped = False
+    if st["consecutive_fails"] >= CIRCUIT_BREAKER_THRESHOLD and not st["tripped"]:
+        st["tripped"] = True
+        just_tripped = True
+        print(f"[CircuitBreaker] {provider}: {st['consecutive_fails']} lỗi "
+              f"Timeout/429 LIÊN TIẾP -> NGẮT MẠCH provider này cho TOÀN BỘ "
+              f"các chunk còn lại của request hiện tại.")
+    return just_tripped
+
+
+def _cb_record_success(provider):
+    """Gọi thành công -> reset bộ đếm lỗi liên tiếp về 0. (Không tự động
+    'đóng lại' mạch đã bị ngắt trong CÙNG request — 1 lần ngắt là ngắt cho
+    hết request đó, tránh dao động lãng phí thời gian; mạch sẽ tự mở lại
+    sạch sẽ ở request KẾ TIẾP)."""
+    st = _get_circuit_breaker_state()[provider]
+    st["consecutive_fails"] = 0
 
 # ============================================================
 # QUẢN LÝ DANH SÁCH USER CON
@@ -839,6 +918,51 @@ def free_translate(text, source_lang, target_lang):
         print(f"Lỗi bộ dịch Google: {str(e)}")
     return ""
 
+
+# ------------------------------------------------------------
+# PARALLEL GOOGLE TRANSLATE FALLBACK (concurrent.futures)
+# ------------------------------------------------------------
+# VẤN ĐỀ CŨ: khi Gemini/Groq hết ngân sách thời gian, các chunk còn lại
+# rơi xuống Google Translate nhưng vẫn được gọi TUẦN TỰ từng chunk một
+# (for chunk in chunks: free_translate(chunk)) -> dù mỗi lần gọi chỉ ~1-2s,
+# với văn bản bị chia thành hàng chục chunk thì độ trễ vẫn CỘNG DỒN đáng
+# kể, góp phần gây WORKER TIMEOUT.
+# GIẢI PHÁP: dùng ThreadPoolExecutor để bắn TẤT CẢ các chunk cần fallback
+# sang Google Translate CÙNG LÚC (song song), tổng thời gian chờ chỉ còn
+# xấp xỉ thời gian của chunk CHẬM NHẤT thay vì tổng tất cả các chunk.
+GOOGLE_TRANSLATE_MAX_WORKERS = 8   # nằm trong khoảng khuyến nghị 5-10
+
+
+def _parallel_google_translate(texts, source_lang, target_lang):
+    """Dịch SONG SONG nhiều đoạn text độc lập bằng Google Translate (tầng
+    dự phòng cuối cùng), thay vì dịch tuần tự từng đoạn.
+    Trả về list bản dịch cùng thứ tự, cùng độ dài với `texts` (không bao
+    giờ trả None — nếu 1 đoạn dịch lỗi thì giữ nguyên văn bản gốc của
+    đoạn đó, để không làm mất nội dung của người dùng)."""
+    if not texts:
+        return []
+    if len(texts) == 1:
+        translated = free_translate(texts[0], source_lang, target_lang)
+        return [translated or texts[0]]
+
+    results = [None] * len(texts)
+    max_workers = max(1, min(GOOGLE_TRANSLATE_MAX_WORKERS, len(texts)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_idx = {
+            executor.submit(free_translate, t, source_lang, target_lang): i
+            for i, t in enumerate(texts)
+        }
+        for future in as_completed(future_to_idx):
+            i = future_to_idx[future]
+            try:
+                results[i] = future.result()
+            except Exception as e:
+                print(f"[Parallel Google Translate] Lỗi ở chunk #{i}: {str(e)}")
+                results[i] = ""
+
+    return [r if r else texts[i] for i, r in enumerate(results)]
+
+
 # ============================================================
 # DỊCH GIỮ NGUYÊN ĐỊNH DẠNG HTML (bold, italic, strike, br...)
 # ============================================================
@@ -962,6 +1086,13 @@ def _call_gemini_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3,
     if not GEMINI_API_KEYS:
         return None
 
+    # CIRCUIT BREAKER: nếu Gemini đã bị ngắt mạch (2 lỗi Timeout/429 liên
+    # tiếp) ở 1 chunk TRƯỚC ĐÓ trong CÙNG request này -> bỏ qua thẳng,
+    # không tốn thêm 1 giây timeout nào nữa, rơi thẳng xuống Groq.
+    if _cb_is_tripped("gemini"):
+        print("Gemini: mạch đã bị NGẮT do lỗi liên tiếp trước đó trong request này -> bỏ qua, chuyển thẳng sang Groq AI...")
+        return None
+
     headers = {"Content-Type": "application/json"}
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
@@ -1002,8 +1133,17 @@ def _call_gemini_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3,
                         return None
 
                     if translated:
+                        _cb_record_success("gemini")
                         return _strip_wrapping_quotes(translated)
                 print(f"Gemini API ({key_label}): phản hồi rỗng/bị chặn - {str(data)[:300]}")
+            elif resp.status_code == 429:
+                # 429 = quá tải hạn mức -> tính vào circuit breaker (đúng
+                # yêu cầu: Timeout / HTTP 429 là 2 loại lỗi "đếm" ngắt mạch)
+                if _cb_record_failure("gemini"):
+                    print("Gemini: đã ngắt mạch sau lỗi 429 liên tiếp -> dừng thử các key còn lại, chuyển sang Groq AI...")
+                    return None
+                print(f"Gemini ({key_label}) lỗi 429 (quá tải hạn mức) -> thử key kế tiếp...")
+                continue
             elif resp.status_code in _DEAD_KEY_STATUS_CODES:
                 print(f"Gemini API ({key_label}) lỗi {resp.status_code} (key hỏng/bị khoá) -> thử key kế tiếp...")
                 continue
@@ -1018,7 +1158,10 @@ def _call_gemini_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3,
             # thử thêm key khác của CÙNG Gemini thường cũng sẽ timeout y
             # hệt, chỉ tổ tốn thêm hàng chục giây. Dừng NGAY toàn bộ vòng
             # xoay key Gemini, chuyển thẳng sang Groq (server khác hẳn).
+            # Đồng thời tính vào circuit breaker: 2 timeout liên tiếp (kể
+            # cả ở các chunk KHÁC nhau của cùng request) sẽ ngắt mạch hẳn.
             print(f"Gemini API ({key_label}) timeout -> bỏ qua các key Gemini còn lại, chuyển thẳng sang Groq AI...")
+            _cb_record_failure("gemini")
             break
         except Exception as e:
             print(f"Lỗi gọi Gemini API ({key_label}): {str(e)}")
@@ -1043,6 +1186,12 @@ def _call_groq_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3, d
     `deadline`: xem ghi chú ở _call_gemini_chat.
     """
     if not GROQ_API_KEYS:
+        return None
+
+    # CIRCUIT BREAKER: giống Gemini — nếu Groq đã bị ngắt mạch trước đó
+    # trong CÙNG request, bỏ qua thẳng, rơi thẳng xuống Google Translate.
+    if _cb_is_tripped("groq"):
+        print("Groq: mạch đã bị NGẮT do lỗi liên tiếp trước đó trong request này -> bỏ qua, chuyển thẳng sang Google Translate...")
         return None
 
     for idx, api_key in enumerate(GROQ_API_KEYS):
@@ -1080,7 +1229,14 @@ def _call_groq_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3, d
                           "loại bỏ kết quả dở dang, chuyển sang Google Translate...")
                     return None
 
+                _cb_record_success("groq")
                 return _strip_wrapping_quotes(translated)
+            elif resp.status_code == 429:
+                if _cb_record_failure("groq"):
+                    print("Groq: đã ngắt mạch sau lỗi 429 liên tiếp -> dừng thử các key còn lại, chuyển sang Google Translate...")
+                    return None
+                print(f"Groq ({key_label}) lỗi 429 (quá tải hạn mức) -> thử key kế tiếp...")
+                continue
             elif resp.status_code in _DEAD_KEY_STATUS_CODES:
                 print(f"Groq API ({key_label}) lỗi {resp.status_code} (key hỏng/bị khoá) -> thử key kế tiếp...")
                 continue
@@ -1091,6 +1247,7 @@ def _call_groq_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3, d
                 print(f"Groq API ({key_label}) lỗi {resp.status_code}: {resp.text[:300]}")
         except requests.exceptions.Timeout:
             print(f"Groq API ({key_label}) timeout -> bỏ qua các key Groq còn lại, chuyển thẳng sang Google Translate...")
+            _cb_record_failure("groq")
             break
         except Exception as e:
             print(f"Lỗi gọi Groq API ({key_label}): {str(e)}")
@@ -1222,11 +1379,18 @@ def _update_running_context(running_context, source_lang, original_piece, transl
     return running_context[-max_items:]
 
 
-def _translate_plain_single_chunk(text, source_lang, target_lang, context=None):
+def _translate_plain_single_chunk_ai_only(text, source_lang, target_lang, context=None):
     """
-    Dịch MỘT khối text thuần (không HTML), đã được đảm bảo đủ ngắn để
-    không bị cắt cụt — chuỗi 3 tầng: Gemini AI -> Groq AI -> Google
-    Translate. Đây là hàm "nguyên tử", KHÔNG tự chia nhỏ thêm.
+    LÕI AI-ONLY: dịch MỘT khối text thuần qua Gemini -> Groq, trả về chuỗi
+    đã dịch hoặc None nếu CẢ HAI đều thất bại — KHÔNG tự gọi Google
+    Translate nội bộ.
+    Lý do tách riêng: các hàm Smart Batching (_batch_translate_via_ai...)
+    cần 1 lõi "chỉ thử AI, thất bại thì trả None" để item thất bại được
+    gộp lại và xử lý THỐNG NHẤT bởi tầng Parallel Google Translate Fallback
+    (_parallel_google_translate) ở cấp điều phối cao hơn — tránh tình
+    huống mỗi item tự âm thầm gọi Google Translate TUẦN TỰ theo kiểu cũ
+    ngay bên trong đệ quy chia nhỏ batch, làm mất tác dụng của việc chạy
+    song song.
     `context`: danh sách các cặp {en, vi} của các câu học/câu liền trước
     gần nhất, dùng để AI hiểu đúng ngữ cảnh (ví dụ câu trả lời ngắn "yes,
     they do" chỉ dịch đúng khi biết câu hỏi trước đó là gì).
@@ -1267,7 +1431,24 @@ def _translate_plain_single_chunk(text, source_lang, target_lang, context=None):
     # max_tokens tính theo độ dài văn bản gốc, có biên độ dư dả để bản dịch
     # (kể cả tiếng Việt vốn dài hơn tiếng Anh) không bao giờ bị hụt token.
     estimated_tokens = max(500, int(len(text.split()) * 4) + 200)
-    translated = _call_ai_chat(system_prompt, user_msg, max_tokens=estimated_tokens)
+    return _call_ai_chat(system_prompt, user_msg, max_tokens=estimated_tokens)
+
+
+def _translate_plain_single_chunk(text, source_lang, target_lang, context=None):
+    """
+    Dịch MỘT khối text thuần (không HTML), đã được đảm bảo đủ ngắn để
+    không bị cắt cụt — chuỗi 3 tầng: Gemini AI -> Groq AI -> Google
+    Translate (tuần tự, vì đây CHỈ có đúng 1 item nên không có gì để chạy
+    song song). Đây là hàm "nguyên tử" dùng cho các lời gọi TRỰC TIẾP,
+    ĐƠN LẺ bên ngoài cơ chế Smart Batching (vd 1 câu đơn không cần chia
+    nhỏ) — KHÔNG dùng hàm này bên trong logic đệ quy của batching, vì nó
+    tự xử lý fallback Google Translate ngay tại chỗ thay vì nhường lại
+    cho tầng Parallel Google Translate Fallback ở cấp điều phối cao hơn.
+    """
+    if not text or not text.strip():
+        return text
+
+    translated = _translate_plain_single_chunk_ai_only(text, source_lang, target_lang, context=context)
     if translated:
         return translated
 
@@ -1284,13 +1465,158 @@ def _translate_plain_single_chunk(text, source_lang, target_lang, context=None):
     return text
 
 
+# ------------------------------------------------------------
+# SMART BATCHING: gộp nhiều chunk ngắn thành 1 lệnh gọi AI DUY NHẤT
+# ------------------------------------------------------------
+# VẤN ĐỀ CŨ: 1 đoạn văn dài bị chia thành N câu/dòng, rồi dịch TUẦN TỰ
+# từng câu (N lệnh gọi Gemini/Groq riêng biệt) -> N * TIMEOUT_PER_CALL là
+# độ trễ TỐI ĐA cộng dồn, dễ vượt ngưỡng WORKER TIMEOUT khi N lớn.
+# GIẢI PHÁP: gộp N câu thành 1 mảng JSON, gửi 1 LỆNH GỌI AI DUY NHẤT với
+# yêu cầu trả về JSON array cùng thứ tự/cùng số lượng phần tử, rồi parse
+# ngược lại. Nhờ vậy 1 đoạn dài chỉ tốn ĐÚNG 1 (hoặc vài, nếu quá nhiều
+# câu) lệnh gọi thay vì N lệnh gọi.
+def _strip_code_fences(text):
+    """Bỏ khối ```json ... ``` (hoặc ``` ... ```) nếu AI lỡ bọc quanh JSON,
+    để json.loads() không bị lỗi."""
+    if not text:
+        return text
+    t = text.strip()
+    if t.startswith("```"):
+        t = re.sub(r'^```[a-zA-Z]*\s*', '', t)
+        t = re.sub(r'\s*```$', '', t)
+    return t.strip()
+
+
+# Giới hạn số câu/chunk gộp vào 1 lệnh gọi AI DUY NHẤT. Không gộp vô hạn
+# vì: (1) prompt quá dài vẫn có thể khiến model bị cắt cụt hoặc chậm hơn
+# TIMEOUT_PER_CALL cho phép, (2) 1 lô nhỏ hơn giúp circuit breaker/deadline
+# phản ứng nhanh hơn nếu provider đang gặp sự cố.
+SMART_BATCH_MAX_ITEMS_PER_CALL = 12
+
+
+def _batch_translate_via_ai(texts, source_lang, target_lang, context=None):
+    """Gộp NHIỀU đoạn text ĐỘC LẬP thành 1 mảng JSON, gửi 1 lệnh gọi AI
+    DUY NHẤT (Gemini -> Groq, có Circuit Breaker + timeout chặt) yêu cầu
+    trả về JSON array cùng thứ tự/cùng số lượng phần tử.
+    Trả về list cùng độ dài với `texts`: bản dịch (str) nếu hợp lệ, hoặc
+    None nếu AI thất bại/trả sai định dạng/sai số lượng phần tử (cần rơi
+    xuống tầng dự phòng)."""
+    if not texts:
+        return []
+    if len(texts) == 1:
+        return [_translate_plain_single_chunk_ai_only(texts[0], source_lang, target_lang, context=context)]
+
+    src_label = "tiếng Anh" if source_lang == "en" else "tiếng Việt"
+    tgt_label = "tiếng Việt" if target_lang == "vi" else "tiếng Anh"
+
+    system_prompt = (
+        f"Bạn là chuyên gia dịch thuật {src_label}-{tgt_label} chuyên nghiệp cho "
+        "một ứng dụng học tiếng Anh giao tiếp. Bạn sẽ nhận một mảng JSON gồm "
+        "nhiều đoạn văn bản ĐỘC LẬP, mỗi phần tử là 1 câu/đoạn cần dịch RIÊNG "
+        f"biệt. Hãy dịch TỪNG phần tử sang {tgt_label} một cách tự nhiên, "
+        "mượt mà, đúng ngữ cảnh, đúng sắc thái hội thoại đời thường — KHÔNG "
+        "dịch máy móc từng từ. Nếu có ngữ cảnh hội thoại đi kèm bên dưới, "
+        "hãy dùng nó để dịch đúng ý các câu trả lời ngắn/mơ hồ (ví dụ 'yes, "
+        "they do' nên dịch theo đúng ý xác nhận câu hỏi trước đó, KHÔNG dịch "
+        "chung chung thành 'tôi đồng ý'). "
+        "QUY TẮC BẮT BUỘC khi trả lời: CHỈ trả về DUY NHẤT một mảng JSON "
+        "(JSON array) các chuỗi — GIỮ NGUYÊN đúng THỨ TỰ và ĐÚNG SỐ LƯỢNG "
+        "phần tử như mảng đầu vào (không gộp 2 phần tử làm 1, không tách "
+        "thêm, không bỏ sót). Không thêm giải thích, không thêm markdown, "
+        "không thêm bất kỳ văn bản nào khác ngoài mảng JSON."
+    ) + _build_context_block(context, "en" if source_lang == "en" else "vi", "vi" if target_lang == "vi" else "en")
+
+    user_payload = json.dumps(texts, ensure_ascii=False)
+    user_msg = f"Mảng JSON gồm {len(texts)} phần tử cần dịch (giữ đúng thứ tự, đúng số lượng):\n{user_payload}"
+
+    estimated_tokens = max(900, sum(len(t.split()) for t in texts) * 4 + 400)
+    raw = _call_ai_chat(system_prompt, user_msg, max_tokens=estimated_tokens)
+    if not raw:
+        return [None] * len(texts)
+
+    cleaned = _strip_code_fences(raw)
+    try:
+        parsed = json.loads(cleaned)
+    except Exception as e:
+        print(f"[Smart Batching] AI trả về không phải JSON hợp lệ ({str(e)}) -> fallback.")
+        return [None] * len(texts)
+
+    if not isinstance(parsed, list) or len(parsed) != len(texts):
+        got = len(parsed) if isinstance(parsed, list) else "không phải mảng"
+        print(f"[Smart Batching] AI trả về sai số lượng phần tử ({got} / {len(texts)}) -> fallback.")
+        return [None] * len(texts)
+
+    return [_strip_wrapping_quotes(str(p)) if p not in (None, "") else None for p in parsed]
+
+
+def _batch_translate_with_retry(texts, source_lang, target_lang, context=None, _depth=0):
+    """Gọi _batch_translate_via_ai; nếu THẤT BẠI TOÀN BỘ lô (AI lỗi/JSON
+    sai định dạng), thử CHIA ĐÔI lô và gọi lại đệ quy (lô nhỏ hơn dễ dịch
+    đúng định dạng hơn) — tối đa 2 lần chia để không tự tạo thêm quá nhiều
+    lệnh gọi. Phần tử nào vẫn thất bại sau cùng được để lại None, sẽ do
+    tầng Google Translate SONG SONG xử lý ở bước sau."""
+    if not texts:
+        return []
+
+    results = _batch_translate_via_ai(texts, source_lang, target_lang, context=context)
+    if all(r is not None for r in results):
+        return results
+    if len(texts) == 1 or _depth >= 2:
+        return results
+
+    mid = len(texts) // 2
+    left = _batch_translate_with_retry(texts[:mid], source_lang, target_lang, context=context, _depth=_depth + 1)
+    right = _batch_translate_with_retry(texts[mid:], source_lang, target_lang, context=context, _depth=_depth + 1)
+    return left + right
+
+
+def _translate_chunks_smart(texts, source_lang, target_lang, context=None):
+    """
+    ĐIỀU PHỐI dịch nhiều chunk văn bản ĐỘC LẬP theo đúng 3 yêu cầu:
+      1) Gộp chunk (Smart Batching): TOÀN BỘ các chunk được gộp vào 1 (hoặc
+         vài, nếu vượt SMART_BATCH_MAX_ITEMS_PER_CALL) lệnh gọi AI DUY
+         NHẤT, thay vì N lệnh gọi tuần tự.
+      2) Circuit Breaker + Timeout chặt: đã tích hợp sẵn bên trong
+         _call_gemini_chat/_call_groq_chat (deadline dùng chung + ngắt
+         mạch sau 2 lỗi Timeout/429 liên tiếp).
+      3) Parallel Google Translate Fallback: chunk nào AI không dịch được
+         (None) sẽ được đẩy đồng loạt sang Google Translate chạy SONG SONG
+         (ThreadPoolExecutor), KHÔNG dịch tuần tự.
+    Trả về list bản dịch cùng thứ tự, cùng độ dài với `texts`.
+    """
+    if not texts:
+        return []
+    if len(texts) == 1:
+        return [_translate_plain_single_chunk(texts[0], source_lang, target_lang, context=context)]
+
+    # Chia thành các lô tối đa SMART_BATCH_MAX_ITEMS_PER_CALL phần tử/lô
+    batches = [texts[i:i + SMART_BATCH_MAX_ITEMS_PER_CALL]
+               for i in range(0, len(texts), SMART_BATCH_MAX_ITEMS_PER_CALL)]
+
+    all_results = []
+    for batch in batches:
+        all_results.extend(_batch_translate_with_retry(batch, source_lang, target_lang, context=context))
+
+    missing_idx = [i for i, r in enumerate(all_results) if not r]
+    if missing_idx:
+        print(f"[Smart Translate] {len(missing_idx)}/{len(texts)} chunk AI không dịch được "
+              f"-> fallback Google Translate SONG SONG (ThreadPoolExecutor)...")
+        fallback_texts = [texts[i] for i in missing_idx]
+        fallback_results = _parallel_google_translate(fallback_texts, source_lang, target_lang)
+        for pos, i in enumerate(missing_idx):
+            all_results[i] = fallback_results[pos]
+
+    return [r if r else texts[i] for i, r in enumerate(all_results)]
+
+
 def _translate_plain(text, source_lang, target_lang, groq_key=None, context=None):
     """
     Dịch một đoạn text thuần (không HTML) — TỰ ĐỘNG CHIA NHỎ nếu đoạn quá
-    dài (nhiều câu), dịch TỪNG PHẦN qua chuỗi Gemini -> Groq -> Google
-    Translate, rồi ghép lại — đảm bảo dịch TOÀN BỘ nội dung được gửi lên,
-    không bao giờ dừng lại giữa chừng như trước đây (khi cả đoạn dài được
-    gửi trong 1 lần gọi AI duy nhất và bị cắt cụt do hết ngân sách token).
+    dài (nhiều câu). Khác với bản trước đây (dịch TUẦN TỰ từng câu qua
+    Gemini -> Groq -> Google Translate), giờ đây TOÀN BỘ các câu được gộp
+    vào 1 (hoặc vài) lệnh gọi AI DUY NHẤT (Smart Batching), và câu nào AI
+    thất bại được fallback Google Translate SONG SONG — xem
+    _translate_chunks_smart().
     `groq_key` giữ lại cho tương thích chữ ký hàm cũ, không còn dùng trực
     tiếp (GROQ_API_KEY đã là biến cấu hình chung ở đầu file).
     `context`: ngữ cảnh hội thoại/câu liền trước (xem _translate_plain_single_chunk).
@@ -1304,16 +1630,7 @@ def _translate_plain(text, source_lang, target_lang, groq_key=None, context=None
     if len(sentence_chunks) <= 1:
         return _translate_plain_single_chunk(text, source_lang, target_lang, context=context)
 
-    # Đoạn dài -> chia nhỏ theo câu, dịch TUẦN TỰ từng câu, mỗi câu được
-    # tham khảo ngữ cảnh của các câu ĐÃ dịch ngay trước đó trong CÙNG đoạn
-    # này (để bản dịch mạch lạc, không rời rạc) + ngữ cảnh hội thoại gốc.
-    running_context = list(context) if context else []
-    translated_pieces = []
-    for piece in sentence_chunks:
-        piece_translated = _translate_plain_single_chunk(piece, source_lang, target_lang, context=running_context)
-        translated_pieces.append(piece_translated)
-        running_context = _update_running_context(running_context, source_lang, piece, piece_translated)
-
+    translated_pieces = _translate_chunks_smart(sentence_chunks, source_lang, target_lang, context=context)
     return " ".join(p for p in translated_pieces if p)
 
 
@@ -1574,25 +1891,104 @@ def _translate_preserving_html_fallback(segments, source_lang, target_lang, cont
     return result_html
 
 
+def _batch_translate_marked_texts(marked_list, tag_maps, source_lang, target_lang, context=None):
+    """Biến thể Smart Batching DÀNH RIÊNG cho các đoạn có thẻ số định dạng
+    (marked_text, vd '<1>bold</1> text <2/>'): gộp NHIỀU đoạn vào 1 mảng
+    JSON, gửi AI dịch trong 1 lệnh gọi DUY NHẤT, kèm quy tắc bắt buộc giữ
+    nguyên các thẻ số. Trả về list: bản dịch hợp lệ (str, đã giữ đủ thẻ
+    số) hoặc None nếu AI thất bại / làm hỏng thẻ số quá nhiều -> cần
+    fallback riêng cho phần tử đó."""
+    if not marked_list:
+        return []
+    if len(marked_list) == 1:
+        t = _translate_marked_text(marked_list[0], source_lang, target_lang, context=context)
+        if t and _verify_markers_intact(t, tag_maps[0]):
+            return [t]
+        return [None]
+
+    tag_rule = (
+        "Mỗi phần tử có thể chứa các thẻ đánh dấu định dạng dạng số, ví dụ "
+        "<1>...</1> (chữ đậm/nghiêng/gạch ngang/gạch chân) hoặc <2/> (ngắt "
+        "dòng). QUY TẮC BẮT BUỘC: giữ NGUYÊN các thẻ số này trong bản dịch "
+        "của TỪNG phần tử — không đổi số, không thêm/xoá thẻ, không dịch "
+        "hay sửa đổi ký tự bên trong dấu < >; được phép di chuyển 1 thẻ "
+        "sang đúng vị trí từ/cụm từ tương ứng trong bản dịch nếu trật tự "
+        "từ của ngôn ngữ đích khác câu gốc, miễn cặp mở/đóng cùng số vẫn "
+        "bao đúng phần nội dung mà nó nhấn mạnh."
+    )
+    src_label = "tiếng Anh" if source_lang == "en" else "tiếng Việt"
+    tgt_label = "tiếng Việt" if target_lang == "vi" else "tiếng Anh"
+
+    system_prompt = (
+        f"Bạn là chuyên gia dịch thuật {src_label}-{tgt_label} chuyên nghiệp, dịch tự "
+        "nhiên như người bản ngữ viết. Bạn sẽ nhận 1 mảng JSON gồm nhiều đoạn "
+        f"văn bản ĐỘC LẬP, dịch TỪNG phần tử sang {tgt_label}. " + tag_rule +
+        " QUY TẮC BẮT BUỘC khi trả lời: CHỈ trả về DUY NHẤT 1 mảng JSON các "
+        "chuỗi, GIỮ ĐÚNG THỨ TỰ và ĐÚNG SỐ LƯỢNG phần tử như mảng đầu vào, "
+        "không thêm giải thích, không thêm markdown."
+    ) + _build_context_block(context, "en" if source_lang == "en" else "vi", "vi" if target_lang == "vi" else "en")
+
+    user_payload = json.dumps(marked_list, ensure_ascii=False)
+    user_msg = f"Mảng JSON gồm {len(marked_list)} phần tử cần dịch, giữ nguyên các thẻ số:\n{user_payload}"
+
+    estimated_tokens = max(1000, sum(len(t.split()) for t in marked_list) * 4 + 500)
+    raw = _call_ai_chat(system_prompt, user_msg, max_tokens=estimated_tokens)
+    if not raw:
+        return [None] * len(marked_list)
+
+    cleaned = _strip_code_fences(raw)
+    try:
+        parsed = json.loads(cleaned)
+    except Exception as e:
+        print(f"[Smart Batching - HTML] AI trả về không phải JSON hợp lệ ({str(e)}) -> fallback.")
+        return [None] * len(marked_list)
+
+    if not isinstance(parsed, list) or len(parsed) != len(marked_list):
+        got = len(parsed) if isinstance(parsed, list) else "không phải mảng"
+        print(f"[Smart Batching - HTML] AI trả về sai số lượng phần tử ({got}/{len(marked_list)}) -> fallback.")
+        return [None] * len(marked_list)
+
+    out = []
+    for text, tmap in zip(parsed, tag_maps):
+        text = _strip_wrapping_quotes(str(text)) if text not in (None, "") else None
+        out.append(text if (text and _verify_markers_intact(text, tmap)) else None)
+    return out
+
+
+def _batch_translate_marked_with_retry(marked_list, tag_maps, source_lang, target_lang, context=None, _depth=0):
+    """Giống _batch_translate_with_retry nhưng cho biến thể marked_text:
+    nếu cả lô thất bại, chia đôi và thử lại đệ quy (tối đa 2 lần)."""
+    if not marked_list:
+        return []
+    results = _batch_translate_marked_texts(marked_list, tag_maps, source_lang, target_lang, context=context)
+    if all(r is not None for r in results):
+        return results
+    if len(marked_list) == 1 or _depth >= 2:
+        return results
+    mid = len(marked_list) // 2
+    left = _batch_translate_marked_with_retry(marked_list[:mid], tag_maps[:mid], source_lang, target_lang, context=context, _depth=_depth + 1)
+    right = _batch_translate_marked_with_retry(marked_list[mid:], tag_maps[mid:], source_lang, target_lang, context=context, _depth=_depth + 1)
+    return left + right
+
+
 def translate_preserving_html(html_text, source_lang, target_lang, context=None):
     """
     Dịch nội dung HTML giữ nguyên định dạng (bold, italic, strike, br...).
 
-    CHIẾN LƯỢC (đã cải tiến để KHÔNG BAO GIỜ dịch dở dang):
-    Toàn bộ nội dung được TÁCH THEO TỪNG DÒNG/ĐOẠN (ngăn cách bởi <br>,
-    tương ứng với cách người dùng xuống dòng khi nhập nhiều câu/nhiều ý
-    trong 1 lần "DỊCH & LƯU"). MỖI DÒNG được dịch RIÊNG qua chuỗi
-    Gemini AI -> Groq AI -> Google Translate, rồi mới ghép lại thành HTML
-    hoàn chỉnh. Nhờ vậy:
-      - Không có lệnh gọi AI nào phải "gánh" quá nhiều nội dung cùng lúc
-        -> không còn bị cắt cụt giữa chừng do hết ngân sách token (lỗi
-        trong ảnh ví dụ: gửi 4 câu hỏi nhưng chỉ dịch được 1 câu rồi
-        dừng).
-      - Từng dòng vẫn được dịch tự nhiên, đúng ngữ cảnh nhờ được truyền
-        kèm NGỮ CẢNH của các dòng NGAY TRƯỚC ĐÓ trong cùng đoạn (và ngữ
-        cảnh hội thoại trước đó nếu có), nên không bị "rời rạc từng câu".
-      - Nếu 1 dòng vẫn còn dài (nhiều câu) thì bản thân _translate_plain
-        sẽ tiếp tục tự chia nhỏ theo câu.
+    CHIẾN LƯỢC (Smart Batching thay cho dịch tuần tự từng dòng):
+    Toàn bộ nội dung được TÁCH THEO TỪNG DÒNG/ĐOẠN (ngăn cách bởi <br>).
+    Thay vì gọi AI RIÊNG cho từng dòng (N dòng = N lệnh gọi tuần tự — vốn
+    là nguyên nhân chính gây cộng dồn độ trễ dẫn tới WORKER TIMEOUT), các
+    dòng được tách thành 2 nhóm và GỘP LẠI:
+      - Nhóm KHÔNG có định dạng (không thẻ <b>/<i>/<s>/<u>): gộp thành 1
+        lô Smart Batching thẳng (mỗi dòng dài tự tách câu bên trong).
+      - Nhóm CÓ định dạng: gộp thành 1 lô Smart Batching biến thể GIỮ
+        NGUYÊN thẻ số (_batch_translate_marked_with_retry).
+    Mỗi nhóm chỉ tốn 1 (hoặc vài, nếu vượt SMART_BATCH_MAX_ITEMS_PER_CALL)
+    lệnh gọi AI cho TOÀN BỘ các dòng cùng loại, thay vì N lệnh gọi riêng.
+    Dòng nào AI thất bại/làm hỏng thẻ số được fallback dịch riêng SONG
+    SONG (ThreadPoolExecutor) thay vì tuần tự, để không bao giờ vỡ layout
+    và không cộng dồn độ trễ.
     """
     segments = parse_html_segments(html_text)
     if not segments:
@@ -1601,39 +1997,79 @@ def translate_preserving_html(html_text, source_lang, target_lang, context=None)
     merged = _merge_segments(segments)
     paragraphs = _split_merged_into_paragraphs(merged)
 
-    running_context = list(context) if context else []
-    result_parts = []
+    # Bước 1: thu thập TOÀN BỘ dòng cần dịch, tách thành 2 nhóm (thường/
+    # có định dạng), giữ lại thông tin cần cho bước fallback nếu cần.
+    para_infos = [None] * len(paragraphs)
+    plain_idx, plain_texts = [], []
+    tagged_idx, tagged_texts, tagged_maps = [], [], []
 
-    for item in paragraphs:
+    for i, item in enumerate(paragraphs):
         if item["type"] == "br":
-            result_parts.append("<br>")
             continue
-
         chunks = item["chunks"]
         plain_preview = "".join(c["text"] for c in chunks)
         if not plain_preview.strip():
             continue
-
         marked_text, tag_map = _build_marked_text_from_chunks(chunks)
-
+        para_infos[i] = {"marked_text": marked_text, "tag_map": tag_map, "chunks": chunks}
         if not tag_map:
-            # Dòng này không có định dạng đậm/nghiêng/gạch... -> dịch
-            # thẳng (hàm _translate_plain tự chia nhỏ thêm nếu quá dài)
-            translated_line_html = _translate_plain(marked_text, source_lang, target_lang, context=running_context)
+            plain_idx.append(i)
+            plain_texts.append(marked_text)
         else:
-            translated_marked = _translate_marked_text(marked_text, source_lang, target_lang, context=running_context)
-            if translated_marked and _verify_markers_intact(translated_marked, tag_map):
-                translated_line_html = _apply_marked_translation_to_html(translated_marked, tag_map)
-            else:
-                # AI làm hỏng thẻ số của riêng dòng này -> dịch dự phòng
-                # an toàn CHỈ cho dòng này (không ảnh hưởng các dòng khác)
-                fallback_segments = [{"text": c["text"], "tags": c["tags"], "is_br": False} for c in chunks]
-                translated_line_html = _translate_preserving_html_fallback(fallback_segments, source_lang, target_lang, context=running_context)
+            tagged_idx.append(i)
+            tagged_texts.append(marked_text)
+            tagged_maps.append(tag_map)
 
-        result_parts.append(translated_line_html)
+    translated_by_idx = {}
 
-        translated_plain = clean_html_for_spellcheck(translated_line_html)
-        running_context = _update_running_context(running_context, source_lang, plain_preview, translated_plain)
+    # Bước 2: NHÓM KHÔNG định dạng -> Smart Batching thẳng
+    if plain_texts:
+        flat_pieces, span = [], []
+        for t in plain_texts:
+            pieces = _split_into_sentences(t, max_chars=350) or [t]
+            start = len(flat_pieces)
+            flat_pieces.extend(pieces)
+            span.append((start, len(pieces)))
+        flat_translated = _translate_chunks_smart(flat_pieces, source_lang, target_lang, context=context)
+        for (start, count), i in zip(span, plain_idx):
+            translated_by_idx[i] = " ".join(p for p in flat_translated[start:start + count] if p)
+
+    # Bước 3: NHÓM CÓ định dạng -> Smart Batching giữ thẻ số
+    if tagged_texts:
+        tagged_results = _batch_translate_marked_with_retry(tagged_texts, tagged_maps, source_lang, target_lang, context=context)
+        fail_positions = [pos for pos, r in enumerate(tagged_results) if r is None]
+
+        if fail_positions:
+            print(f"[Smart Batching - HTML] {len(fail_positions)}/{len(tagged_texts)} dòng có định dạng "
+                  f"bị AI làm hỏng thẻ số hoặc lỗi -> fallback dịch riêng SONG SONG cho các dòng này...")
+
+            def _fallback_one(pos):
+                i = tagged_idx[pos]
+                info = para_infos[i]
+                fallback_segments = [{"text": c["text"], "tags": c["tags"], "is_br": False} for c in info["chunks"]]
+                html_out = _translate_preserving_html_fallback(fallback_segments, source_lang, target_lang, context=context)
+                return i, html_out
+
+            max_workers = max(1, min(GOOGLE_TRANSLATE_MAX_WORKERS, len(fail_positions)))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = [executor.submit(_fallback_one, pos) for pos in fail_positions]
+                for future in as_completed(futures):
+                    i, html_out = future.result()
+                    translated_by_idx[i] = html_out   # đã là HTML hoàn chỉnh (tags áp lại sẵn)
+
+        fail_set = {tagged_idx[pos] for pos in fail_positions}
+        for pos, i in enumerate(tagged_idx):
+            if i in fail_set:
+                continue
+            translated_by_idx[i] = _apply_marked_translation_to_html(tagged_results[pos], tagged_maps[pos])
+
+    # Bước 4: ghép lại đúng thứ tự gốc
+    result_parts = []
+    for i, item in enumerate(paragraphs):
+        if item["type"] == "br":
+            result_parts.append("<br>")
+        elif i in translated_by_idx:
+            result_parts.append(translated_by_idx[i])
 
     return "".join(result_parts)
 
@@ -1682,8 +2118,10 @@ def _translate_sentence_atomic(clean_text, source_lang, target_lang, context=Non
 
 
 def _translate_sentence(text, source_lang, target_lang, context=None):
-    """Dịch một câu/1 dòng — TỰ ĐỘNG chia nhỏ theo câu nếu quá dài, để
-    không bao giờ bị cắt cụt giữa chừng (giống cơ chế của _translate_plain)."""
+    """Dịch một câu/1 dòng — TỰ ĐỘNG chia nhỏ theo câu nếu quá dài. Nếu chỉ
+    có 1 câu, dùng đường dịch "atomic" (giữ nguyên prompt xử lý câu trả
+    lời ngắn theo ngữ cảnh, vd 'yes, they do'). Nếu nhiều câu, gộp TẤT CẢ
+    vào Smart Batching (1 lệnh gọi AI duy nhất) thay vì dịch tuần tự."""
     if not text or not text.strip():
         return text
 
@@ -1691,13 +2129,41 @@ def _translate_sentence(text, source_lang, target_lang, context=None):
     if len(sentence_chunks) <= 1:
         return _translate_sentence_atomic(text, source_lang, target_lang, context=context)
 
-    running_context = list(context) if context else []
-    translated_pieces = []
-    for piece in sentence_chunks:
-        piece_translated = _translate_sentence_atomic(piece, source_lang, target_lang, context=running_context)
-        translated_pieces.append(piece_translated)
-        running_context = _update_running_context(running_context, source_lang, piece, piece_translated)
+    translated_pieces = _translate_chunks_smart(sentence_chunks, source_lang, target_lang, context=context)
     return " ".join(p for p in translated_pieces if p)
+
+
+def _translate_lines_smart(lines, source_lang, target_lang, context=None):
+    """Dịch NHIỀU DÒNG cùng lúc bằng Smart Batching.
+    Trước đây: mỗi dòng được dịch qua _translate_sentence RIÊNG (dòng dài
+    lại tự chia câu bên trong) -> tổng số lệnh gọi AI = tổng số câu của
+    TẤT CẢ các dòng, dịch TUẦN TỰ.
+    Bây giờ: mỗi dòng được tách sẵn thành các câu (nếu cần), rồi TOÀN BỘ
+    câu của TẤT CẢ các dòng được gộp chung vào 1 lô Smart Batching duy
+    nhất (_translate_chunks_smart) — chỉ còn 1 (hoặc vài, nếu vượt
+    SMART_BATCH_MAX_ITEMS_PER_CALL) lệnh gọi AI cho CẢ ĐOẠN nhiều dòng.
+    Trả về list bản dịch từng dòng, cùng thứ tự với `lines` (dòng trống
+    trả về chuỗi rỗng)."""
+    flat_pieces = []
+    line_span = []  # (start_index_trong_flat_pieces, số_câu) cho từng dòng
+    for line in lines:
+        if not line.strip():
+            line_span.append((len(flat_pieces), 0))
+            continue
+        pieces = _split_into_sentences(line, max_chars=350) or [line]
+        start = len(flat_pieces)
+        flat_pieces.extend(pieces)
+        line_span.append((start, len(pieces)))
+
+    translated_flat = _translate_chunks_smart(flat_pieces, source_lang, target_lang, context=context)
+
+    translated_lines = []
+    for start, count in line_span:
+        if count == 0:
+            translated_lines.append("")
+        else:
+            translated_lines.append(" ".join(p for p in translated_flat[start:start + count] if p))
+    return translated_lines
 
 
 def smart_translate(text, source_lang, target_lang, context=None):
@@ -1705,8 +2171,9 @@ def smart_translate(text, source_lang, target_lang, context=None):
     ngữ cảnh nguyên câu (và ngữ cảnh hội thoại trước đó nếu có) thay vì
     rời rạc từng từ. Chuỗi dịch: Gemini AI -> Groq AI -> Google Translate.
     Nội dung nhiều dòng/nhiều câu được TỰ ĐỘNG CHIA NHỎ (theo dòng, rồi
-    theo câu nếu vẫn còn dài) để dịch TOÀN BỘ, không bao giờ dừng lại
-    giữa chừng."""
+    theo câu nếu vẫn còn dài) và GỘP LẠI thành Smart Batching để dịch
+    TOÀN BỘ trong tối thiểu số lệnh gọi AI, không bao giờ dừng lại giữa
+    chừng."""
     # Kiểm tra text có chứa HTML tags định dạng không
     has_formatting = bool(re.search(r'<(b|strong|i|em|s|strike|del|u|br)[^>]*>', text, re.IGNORECASE))
 
@@ -1725,18 +2192,10 @@ def smart_translate(text, source_lang, target_lang, context=None):
     if len(real_lines) <= 1:
         return _translate_sentence(clean_text, source_lang, target_lang, context=context)
 
-    # Nhiều dòng -> dịch TUẦN TỰ từng dòng, tích lũy ngữ cảnh giữa các
-    # dòng để bản dịch mạch lạc, rồi ghép lại đúng bố cục xuống dòng gốc.
-    running_context = list(context) if context else []
-    translated_lines = []
-    for line in lines:
-        if not line.strip():
-            translated_lines.append("")
-            continue
-        line_translated = _translate_sentence(line, source_lang, target_lang, context=running_context)
-        translated_lines.append(line_translated)
-        running_context = _update_running_context(running_context, source_lang, line, line_translated)
-
+    # Nhiều dòng -> gộp TẤT CẢ câu của TẤT CẢ dòng vào Smart Batching,
+    # dịch chung trong tối thiểu số lệnh gọi AI, rồi ghép lại đúng bố cục
+    # xuống dòng gốc.
+    translated_lines = _translate_lines_smart(lines, source_lang, target_lang, context=context)
     return "\n".join(translated_lines)
 
 def smart_context_analyzer(text):
