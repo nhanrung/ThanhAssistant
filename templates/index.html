@@ -271,7 +271,14 @@ function handleUnauthorized() {
 }
 
 async function authFetch(url, options = {}) {
-    const response = await fetch(url, options);
+    // Gắn password vào header Authorization thay vì để lộ trong URL/query
+    // string (URL bị ghi lại nguyên văn vào access log của server, còn
+    // header thì không).
+    const headers = Object.assign({}, options.headers || {});
+    if (currentPassword) {
+        headers["Authorization"] = `Bearer ${currentPassword}`;
+    }
+    const response = await fetch(url, Object.assign({}, options, { headers }));
     if (response.status === 401) { handleUnauthorized(); throw new Error("UNAUTHORIZED"); }
     return response;
 }
@@ -329,7 +336,7 @@ function handleLogout() { stopReading(); localStorage.clear(); location.reload()
 
 async function loadSubUsers() {
     try {
-        const resp = await authFetch(`/api/admin/list_users?password=${encodeURIComponent(currentPassword)}`);
+        const resp = await authFetch(`/api/admin/list_users`);
         const data = await resp.json();
         if (data.status === "success") { subUsersList = data.users; updateViewingUserSelect(); renderUserList(); }
     } catch(e) { console.error(e); }
@@ -412,7 +419,7 @@ function switchTab(tab) {
 
 async function loadUserLogs() {
     try {
-        const resp = await authFetch(`/api/load_log?username=${viewingUsername}&password=${encodeURIComponent(currentPassword)}`);
+        const resp = await authFetch(`/api/load_log?username=${viewingUsername}`);
         const data = await resp.json();
         if (data.status === "success") { learningLogs = data.data; selectedIndex = null; renderLogs(); }
     } catch(e) { console.error(e); }
