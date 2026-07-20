@@ -606,23 +606,24 @@ OXFORD_3000_DICT = {
 
 def _extract_password(req_data_or_args):
     """
-    Lấy mật khẩu từ request, ƯU TIÊN header 'Authorization: Bearer <password>'.
+    Lấy mật khẩu từ request — CHỈ đọc từ header 'Authorization: Bearer <password>'.
 
     LÝ DO: nếu password nằm trong query string (?password=...) hoặc URL,
-    nó sẽ bị ghi lại nguyên văn vào access log của hạ tầng (Render/uWSGI...),
-    vào header Referer của các request kế tiếp, và vào lịch sử trình duyệt.
-    Header Authorization thì KHÔNG bị các server access log tiêu chuẩn ghi
-    lại theo cách đó, nên đây là chỗ đúng để gửi password.
+    nó sẽ bị ghi lại nguyên văn vào access log của hạ tầng (Render/uWSGI/
+    PythonAnywhere...), vào header Referer của các request kế tiếp, và vào
+    lịch sử trình duyệt. Header Authorization thì KHÔNG bị các server access
+    log tiêu chuẩn ghi lại theo cách đó, nên đây là chỗ đúng để gửi password.
 
-    Vẫn giữ fallback đọc 'password' từ body/query string để không làm gãy
-    các client (JS phía trước) chưa kịp cập nhật gửi qua header. Sau khi
-    toàn bộ frontend đã chuyển sang gửi header Authorization, có thể xoá
-    dòng fallback bên dưới để bắt buộc dùng header.
+    KHÔNG còn fallback đọc 'password' từ query string/body nữa — toàn bộ
+    frontend (index.html) đã chuyển sang gửi header Authorization. Nếu vẫn
+    giữ fallback, ai đó (hoặc chính bạn quên) gọi API kiểu cũ
+    '?password=...' vẫn sẽ được chấp nhận và tiếp tục bị ghi vào access log
+    y như trước — tức là chưa vá được lỗ hổng thật sự.
     """
     auth_header = request.headers.get('Authorization', '')
     if auth_header.lower().startswith('bearer '):
         return auth_header[7:].strip()
-    return req_data_or_args.get('password', '')
+    return ''
 
 
 def verify_request_password(req_data_or_args):
