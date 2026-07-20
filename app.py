@@ -300,17 +300,82 @@ if not _github_storage_configured():
 # của Groq, chất lượng dịch đa ngôn ngữ tốt, KHÔNG nằm trong danh sách
 # model sắp bị deprecate.
 #
-# Nên đặt các API KEY qua biến môi trường khi có thể, thay vì hard-code.
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyDFqrAdQd0SP9ZcmobIaDt2VrgjFGf75dM")
+# ------------------------------------------------------------------
+# AN TOÀN API KEY — BẮT BUỘC ĐỌC:
+# TUYỆT ĐỐI KHÔNG hard-code key thật vào code (dù trong file này hay bất
+# kỳ file nào khác được commit lên GitHub) — repo public thì Google/
+# GitHub sẽ tự động quét ra và khoá key ngay (lỗi "reported as leaked").
+# Toàn bộ key phải đặt qua biến môi trường trên Render / PythonAnywhere
+# (Dashboard -> Environment), KHÔNG đặt giá trị mặc định thật ở đây.
+#
+# HỖ TRỢ NHIỀU KEY (xoay vòng chống nghẽn 429 / khoá 403):
+# Đặt nhiều key cách nhau bằng dấu phẩy, ví dụ trên Render:
+#   GEMINI_API_KEYS = AIzaSy-key-1,AIzaSy-key-2,AIzaSy-key-3
+#   GROQ_API_KEYS   = gsk_key-1,gsk_key-2
+# (Vẫn hỗ trợ biến số ít GEMINI_API_KEY / GROQ_API_KEY cho tương thích
+# ngược, chỉ 1 key.)
+# ------------------------------------------------------------------
+def _load_key_list(*env_names):
+    """Đọc danh sách key từ biến môi trường, hỗ trợ 2 kiểu đặt tên:
+      1) Gộp 1 biến, nhiều key cách nhau bằng dấu phẩy:
+         GEMINI_API_KEYS = key1,key2,key3
+      2) Nhiều biến đánh số riêng lẻ (đúng kiểu đang dùng trên Render):
+         GEMINI_API_KEY, GEMINI_API_KEY1, GEMINI_API_KEY2, GEMINI_API_KEY3, ...
+         GROQ_API_KEY, GROQ_API_KEY2, GROQ_API_KEY3, ... (không cần liền số,
+         không có KEY1 vẫn không sao, sẽ tự bỏ qua và đọc tiếp KEY2, KEY3...)
+    Gộp toàn bộ key tìm được từ cả 2 kiểu lại, loại trùng, giữ thứ tự.
+    """
+    keys = []
+    seen = set()
+
+    def _add(raw):
+        for k in raw.split(","):
+            k = k.strip()
+            if k and k not in seen:
+                seen.add(k)
+                keys.append(k)
+
+    # Kiểu 1: biến số nhiều, gộp bằng dấu phẩy (vd GEMINI_API_KEYS)
+    for name in env_names:
+        raw = os.environ.get(name, "")
+        if raw.strip():
+            _add(raw)
+
+    # Kiểu 2: biến đánh số riêng lẻ, dựa trên tên số ít trong env_names
+    # (vd GEMINI_API_KEY, GEMINI_API_KEY1 .. GEMINI_API_KEY20)
+    singular_names = [n for n in env_names if not n.endswith("S")]
+    for base in singular_names:
+        # base không hậu tố số (GEMINI_API_KEY) đã đọc ở vòng trên nếu có
+        # nhưng đọc lại ở đây phòng trường hợp chỉ set kiểu số ít
+        raw = os.environ.get(base, "")
+        if raw.strip():
+            _add(raw)
+        for i in range(1, 21):  # hỗ trợ tới 20 key đánh số, dư sức dùng
+            raw = os.environ.get(f"{base}{i}", "")
+            if raw.strip():
+                _add(raw)
+
+    return keys
+
+GEMINI_API_KEYS = _load_key_list("GEMINI_API_KEYS", "GEMINI_API_KEY")
 GEMINI_TRANSLATE_MODEL = "gemini-2.5-flash"
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_TRANSLATE_MODEL}:generateContent"
 
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "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")
+GROQ_API_KEYS = _load_key_list("GROQ_API_KEYS", "GROQ_API_KEY")
 GROQ_TRANSLATE_MODEL = "openai/gpt-oss-120b"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# Mã lỗi HTTP coi là "quá tải / hết hạn mức" -> chuyển ngay sang tầng dịch kế tiếp
+if not GEMINI_API_KEYS:
+    print("CẢNH BÁO: chưa cấu hình GEMINI_API_KEYS/GEMINI_API_KEY -> tầng dịch Gemini sẽ bị bỏ qua.")
+if not GROQ_API_KEYS:
+    print("CẢNH BÁO: chưa cấu hình GROQ_API_KEYS/GROQ_API_KEY -> tầng dịch Groq sẽ bị bỏ qua.")
+
+# Mã lỗi HTTP coi là "quá tải / hết hạn mức" -> thử key kế tiếp (nếu còn),
+# hết key thì mới chuyển sang tầng dịch kế tiếp
 _OVERLOAD_STATUS_CODES = {429, 500, 502, 503, 504}
+# Mã lỗi coi là "key hỏng/bị khoá vĩnh viễn" -> loại key này khỏi vòng
+# xoay ngay lập tức (khác với quá tải tạm thời), thử key kế tiếp
+_DEAD_KEY_STATUS_CODES = {401, 403}
 
 # ============================================================
 # QUẢN LÝ DANH SÁCH USER CON
@@ -822,6 +887,11 @@ def _call_gemini_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3)
     Trả về chuỗi đã dịch, hoặc None nếu thất bại/quá tải/bị cắt cụt (để
     hàm gọi tự động chuyển sang tầng dự phòng kế tiếp là Groq).
 
+    XOAY VÒNG NHIỀU KEY: nếu có nhiều key trong GEMINI_API_KEYS, lần lượt
+    thử từng key — key nào bị quá tải (429/5xx) hoặc bị khoá (401/403)
+    thì bỏ qua ngay, thử key kế tiếp; chỉ khi TẤT CẢ key đều thất bại mới
+    trả None để rơi sang Groq.
+
     GHI CHÚ QUAN TRỌNG (nguyên nhân lỗi "dịch nửa chừng rồi dừng"):
     Model gemini-2.5-flash mặc định BẬT chế độ "thinking" (suy luận ẩn),
     và phần suy luận ẩn này TIÊU TỐN CHUNG ngân sách với maxOutputTokens.
@@ -835,46 +905,58 @@ def _call_gemini_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3)
          (trả None) để hệ thống tự động chuyển sang Groq, thay vì lặng
          lẽ trả về bản dịch bị cắt cho người dùng.
     """
-    if not GEMINI_API_KEY:
+    if not GEMINI_API_KEYS:
         return None
-    try:
-        headers = {"Content-Type": "application/json"}
-        params = {"key": GEMINI_API_KEY}
-        payload = {
-            "system_instruction": {"parts": [{"text": system_prompt}]},
-            "contents": [{"role": "user", "parts": [{"text": user_msg}]}],
-            "generationConfig": {
-                "temperature": temperature,
-                "maxOutputTokens": max_tokens,
-                "thinkingConfig": {"thinkingBudget": 0},
-            }
+
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"role": "user", "parts": [{"text": user_msg}]}],
+        "generationConfig": {
+            "temperature": temperature,
+            "maxOutputTokens": max_tokens,
+            "thinkingConfig": {"thinkingBudget": 0},
         }
-        resp = requests.post(GEMINI_API_URL, headers=headers, params=params, json=payload, timeout=20)
-        if resp.status_code == 200:
-            data = resp.json()
-            candidates = data.get("candidates", [])
-            if candidates:
-                cand = candidates[0]
-                finish_reason = cand.get("finishReason", "")
-                parts = cand.get("content", {}).get("parts", [])
-                translated = "".join(p.get("text", "") for p in parts).strip()
+    }
 
-                if finish_reason == "MAX_TOKENS":
-                    print("Gemini bị CẮT CỤT do hết ngân sách token (MAX_TOKENS) -> "
-                          "loại bỏ kết quả dở dang, chuyển sang Groq AI...")
-                    return None
+    for idx, api_key in enumerate(GEMINI_API_KEYS):
+        key_label = f"key #{idx + 1}/{len(GEMINI_API_KEYS)}"
+        try:
+            params = {"key": api_key}
+            resp = requests.post(GEMINI_API_URL, headers=headers, params=params, json=payload, timeout=20)
+            if resp.status_code == 200:
+                data = resp.json()
+                candidates = data.get("candidates", [])
+                if candidates:
+                    cand = candidates[0]
+                    finish_reason = cand.get("finishReason", "")
+                    parts = cand.get("content", {}).get("parts", [])
+                    translated = "".join(p.get("text", "") for p in parts).strip()
 
-                if translated:
-                    return _strip_wrapping_quotes(translated)
-            print(f"Gemini API: phản hồi rỗng/bị chặn - {str(data)[:300]}")
-        elif resp.status_code in _OVERLOAD_STATUS_CODES:
-            print(f"Gemini quá tải/lỗi tạm thời ({resp.status_code}) -> chuyển sang Groq AI...")
-        else:
-            print(f"Gemini API lỗi {resp.status_code}: {resp.text[:300]}")
-    except requests.exceptions.Timeout:
-        print("Gemini API timeout -> chuyển sang Groq AI...")
-    except Exception as e:
-        print(f"Lỗi gọi Gemini API: {str(e)}")
+                    if finish_reason == "MAX_TOKENS":
+                        print("Gemini bị CẮT CỤT do hết ngân sách token (MAX_TOKENS) -> "
+                              "loại bỏ kết quả dở dang, chuyển sang Groq AI...")
+                        return None
+
+                    if translated:
+                        return _strip_wrapping_quotes(translated)
+                print(f"Gemini API ({key_label}): phản hồi rỗng/bị chặn - {str(data)[:300]}")
+            elif resp.status_code in _DEAD_KEY_STATUS_CODES:
+                print(f"Gemini API ({key_label}) lỗi {resp.status_code} (key hỏng/bị khoá) -> thử key kế tiếp...")
+                continue
+            elif resp.status_code in _OVERLOAD_STATUS_CODES:
+                print(f"Gemini ({key_label}) quá tải/lỗi tạm thời ({resp.status_code}) -> thử key kế tiếp...")
+                continue
+            else:
+                print(f"Gemini API ({key_label}) lỗi {resp.status_code}: {resp.text[:300]}")
+        except requests.exceptions.Timeout:
+            print(f"Gemini API ({key_label}) timeout -> thử key kế tiếp...")
+            continue
+        except Exception as e:
+            print(f"Lỗi gọi Gemini API ({key_label}): {str(e)}")
+            continue
+
+    print("Tất cả Gemini API key đều thất bại -> chuyển sang Groq AI...")
     return None
 
 
@@ -887,42 +969,56 @@ def _call_groq_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3):
       trả lời nhanh hơn trên model dạng reasoning như gpt-oss.
     Trả về chuỗi đã dịch, hoặc None nếu thất bại (để hàm gọi tự quyết định
     phương án dự phòng cuối cùng là Google Translate).
+
+    XOAY VÒNG NHIỀU KEY: giống Gemini ở trên — lần lượt thử từng key
+    trong GROQ_API_KEYS, bỏ qua key hỏng/quá tải để thử key kế tiếp.
     """
-    if not GROQ_API_KEY:
+    if not GROQ_API_KEYS:
         return None
-    try:
-        headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-        payload = {
-            "model": GROQ_TRANSLATE_MODEL,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "reasoning_effort": "low",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_msg}
-            ]
-        }
-        resp = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=20)
-        if resp.status_code == 200:
-            data = resp.json()
-            choice = data["choices"][0]
-            finish_reason = choice.get("finish_reason", "")
-            translated = choice["message"]["content"].strip()
 
-            if finish_reason == "length":
-                print("Groq bị CẮT CỤT do hết ngân sách token (finish_reason=length) -> "
-                      "loại bỏ kết quả dở dang, chuyển sang Google Translate...")
-                return None
+    for idx, api_key in enumerate(GROQ_API_KEYS):
+        key_label = f"key #{idx + 1}/{len(GROQ_API_KEYS)}"
+        try:
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+            payload = {
+                "model": GROQ_TRANSLATE_MODEL,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "reasoning_effort": "low",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_msg}
+                ]
+            }
+            resp = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=20)
+            if resp.status_code == 200:
+                data = resp.json()
+                choice = data["choices"][0]
+                finish_reason = choice.get("finish_reason", "")
+                translated = choice["message"]["content"].strip()
 
-            return _strip_wrapping_quotes(translated)
-        elif resp.status_code in _OVERLOAD_STATUS_CODES:
-            print(f"Groq cũng quá tải/lỗi tạm thời ({resp.status_code}) -> chuyển sang Google Translate...")
-        else:
-            print(f"Groq API lỗi {resp.status_code}: {resp.text[:300]}")
-    except requests.exceptions.Timeout:
-        print("Groq API timeout -> chuyển sang Google Translate...")
-    except Exception as e:
-        print(f"Lỗi gọi Groq API: {str(e)}")
+                if finish_reason == "length":
+                    print("Groq bị CẮT CỤT do hết ngân sách token (finish_reason=length) -> "
+                          "loại bỏ kết quả dở dang, chuyển sang Google Translate...")
+                    return None
+
+                return _strip_wrapping_quotes(translated)
+            elif resp.status_code in _DEAD_KEY_STATUS_CODES:
+                print(f"Groq API ({key_label}) lỗi {resp.status_code} (key hỏng/bị khoá) -> thử key kế tiếp...")
+                continue
+            elif resp.status_code in _OVERLOAD_STATUS_CODES:
+                print(f"Groq ({key_label}) quá tải/lỗi tạm thời ({resp.status_code}) -> thử key kế tiếp...")
+                continue
+            else:
+                print(f"Groq API ({key_label}) lỗi {resp.status_code}: {resp.text[:300]}")
+        except requests.exceptions.Timeout:
+            print(f"Groq API ({key_label}) timeout -> thử key kế tiếp...")
+            continue
+        except Exception as e:
+            print(f"Lỗi gọi Groq API ({key_label}): {str(e)}")
+            continue
+
+    print("Tất cả Groq API key đều thất bại -> chuyển sang Google Translate...")
     return None
 
 
