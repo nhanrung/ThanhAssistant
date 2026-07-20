@@ -1,0 +1,7 @@
+# Không bao giờ commit file chứa key/secret
+.env
+*.env
+secrets.json
+keys.json
+__pycache__/
+*.pyc
