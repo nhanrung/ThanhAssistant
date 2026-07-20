@@ -358,7 +358,11 @@ def _load_key_list(*env_names):
     return keys
 
 GEMINI_API_KEYS = _load_key_list("GEMINI_API_KEYS", "GEMINI_API_KEY")
-GEMINI_TRANSLATE_MODEL = "gemini-2.5-flash"
+# CẬP NHẬT 20/07/2026: Google đã khai tử "gemini-2.5-flash" (model cũ trả về
+# lỗi 404 "no longer available to new users" với key mới, và bị giới hạn
+# quota gắt với key cũ). Đổi sang "gemini-3.5-flash" — model GA (ổn định,
+# sẵn sàng cho production) hiện được Google khuyến nghị thay thế.
+GEMINI_TRANSLATE_MODEL = "gemini-3.5-flash"
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_TRANSLATE_MODEL}:generateContent"
 
 GROQ_API_KEYS = _load_key_list("GROQ_API_KEYS", "GROQ_API_KEY")
@@ -376,6 +380,19 @@ _OVERLOAD_STATUS_CODES = {429, 500, 502, 503, 504}
 # Mã lỗi coi là "key hỏng/bị khoá vĩnh viễn" -> loại key này khỏi vòng
 # xoay ngay lập tức (khác với quá tải tạm thời), thử key kế tiếp
 _DEAD_KEY_STATUS_CODES = {401, 403}
+
+# NGÂN SÁCH THỜI GIAN TỔNG (chống lỗi "WORKER TIMEOUT" trên Render/gunicorn):
+# Gunicorn mặc định giết worker nếu 1 request xử lý quá 30 giây. Trước đây
+# code thử LẦN LƯỢT 3 key Gemini x 20s + 3 key Groq x 20s = có thể tới 120
+# giây -> gunicorn giết worker giữa chừng -> MẤT TRẮNG toàn bộ bản dịch dù
+# đã tính xong. Nay giới hạn: mỗi lần gọi API tối đa TIMEOUT_PER_CALL giây,
+# và TOÀN BỘ chuỗi Gemini+Groq không được vượt quá AI_TOTAL_TIME_BUDGET giây
+# -> hết ngân sách thì dừng thử key/tầng tiếp theo, rơi thẳng xuống Google
+# Translate (luôn nhanh) thay vì để gunicorn giết worker.
+TIMEOUT_PER_CALL = 10          # giây, timeout cho MỖI lần gọi Gemini/Groq
+AI_TOTAL_TIME_BUDGET = 22      # giây, tổng thời gian tối đa cho cả Gemini+Groq
+                                # (chừa dư ít nhất 8s trước khi gunicorn (30s)
+                                # can thiệp, cộng thời gian Google Translate)
 
 # ============================================================
 # QUẢN LÝ DANH SÁCH USER CON
@@ -881,26 +898,33 @@ def _strip_wrapping_quotes(text):
     return text
 
 
-def _call_gemini_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3):
+def _call_gemini_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3, deadline=None):
     """
     Hàm gọi Gemini API (Google) — TẦNG DỊCH ƯU TIÊN SỐ 1.
-    Trả về chuỗi đã dịch, hoặc None nếu thất bại/quá tải/bị cắt cụt (để
-    hàm gọi tự động chuyển sang tầng dự phòng kế tiếp là Groq).
+    Trả về chuỗi đã dịch, hoặc None nếu thất bại/quá tải/bị cắt cụt/hết
+    ngân sách thời gian (để hàm gọi tự động chuyển sang tầng dự phòng kế
+    tiếp là Groq).
 
     XOAY VÒNG NHIỀU KEY: nếu có nhiều key trong GEMINI_API_KEYS, lần lượt
     thử từng key — key nào bị quá tải (429/5xx) hoặc bị khoá (401/403)
-    thì bỏ qua ngay, thử key kế tiếp; chỉ khi TẤT CẢ key đều thất bại mới
-    trả None để rơi sang Groq.
+    thì bỏ qua ngay, thử key kế tiếp; chỉ khi TẤT CẢ key đều thất bại
+    (hoặc hết ngân sách thời gian `deadline`) mới trả None để rơi sang
+    Groq.
+
+    `deadline`: mốc thời gian (time.time() + số giây) mà TOÀN BỘ chuỗi
+    Gemini+Groq phải xong trước đó — chống lỗi gunicorn "WORKER TIMEOUT"
+    khi thử quá nhiều key/tầng liên tiếp (xem ghi chú AI_TOTAL_TIME_BUDGET
+    ở đầu file).
 
     GHI CHÚ QUAN TRỌNG (nguyên nhân lỗi "dịch nửa chừng rồi dừng"):
-    Model gemini-2.5-flash mặc định BẬT chế độ "thinking" (suy luận ẩn),
-    và phần suy luận ẩn này TIÊU TỐN CHUNG ngân sách với maxOutputTokens.
+    Các model Gemini 3.x mặc định BẬT chế độ "thinking" (suy luận ẩn), và
+    phần suy luận ẩn này TIÊU TỐN CHUNG ngân sách với maxOutputTokens.
     Với đoạn văn dài (nhiều câu/nhiều dòng), phần suy luận ẩn có thể ăn
     gần hết ngân sách token, khiến câu trả lời thực sự bị cắt cụt giữa
     chừng (finishReason = "MAX_TOKENS") nhưng vẫn có vẻ như "thành công"
     vì vẫn có text trả về (chỉ là dở dang). -> Khắc phục bằng 2 cách:
-      1) Tắt thinking (thinkingBudget = 0) vì dịch thuật không cần suy
-         luận sâu.
+      1) Đặt thinkingLevel = "minimal" (tham số MỚI thay cho thinkingBudget
+         đã lỗi thời từ Gemini 3.x — dịch thuật không cần suy luận sâu).
       2) Kiểm tra finishReason: nếu là MAX_TOKENS thì coi là THẤT BẠI
          (trả None) để hệ thống tự động chuyển sang Groq, thay vì lặng
          lẽ trả về bản dịch bị cắt cho người dùng.
@@ -915,15 +939,24 @@ def _call_gemini_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3)
         "generationConfig": {
             "temperature": temperature,
             "maxOutputTokens": max_tokens,
-            "thinkingConfig": {"thinkingBudget": 0},
+            "thinkingConfig": {"thinkingLevel": "minimal"},
         }
     }
 
     for idx, api_key in enumerate(GEMINI_API_KEYS):
         key_label = f"key #{idx + 1}/{len(GEMINI_API_KEYS)}"
+
+        if deadline is not None and time.time() >= deadline:
+            print(f"Gemini: hết ngân sách thời gian trước khi thử {key_label} -> chuyển sang Groq AI...")
+            return None
+
+        remaining = TIMEOUT_PER_CALL
+        if deadline is not None:
+            remaining = max(1, min(TIMEOUT_PER_CALL, deadline - time.time()))
+
         try:
             params = {"key": api_key}
-            resp = requests.post(GEMINI_API_URL, headers=headers, params=params, json=payload, timeout=20)
+            resp = requests.post(GEMINI_API_URL, headers=headers, params=params, json=payload, timeout=remaining)
             if resp.status_code == 200:
                 data = resp.json()
                 candidates = data.get("candidates", [])
@@ -960,7 +993,7 @@ def _call_gemini_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3)
     return None
 
 
-def _call_groq_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3):
+def _call_groq_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3, deadline=None):
     """
     Hàm gọi Groq API — TẦNG DỊCH DỰ PHÒNG SỐ 2 (khi Gemini quá tải/lỗi).
     - model: openai/gpt-oss-120b (xem ghi chú ở đầu file vì sao đổi model)
@@ -972,12 +1005,22 @@ def _call_groq_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3):
 
     XOAY VÒNG NHIỀU KEY: giống Gemini ở trên — lần lượt thử từng key
     trong GROQ_API_KEYS, bỏ qua key hỏng/quá tải để thử key kế tiếp.
+    `deadline`: xem ghi chú ở _call_gemini_chat.
     """
     if not GROQ_API_KEYS:
         return None
 
     for idx, api_key in enumerate(GROQ_API_KEYS):
         key_label = f"key #{idx + 1}/{len(GROQ_API_KEYS)}"
+
+        if deadline is not None and time.time() >= deadline:
+            print(f"Groq: hết ngân sách thời gian trước khi thử {key_label} -> chuyển sang Google Translate...")
+            return None
+
+        remaining = TIMEOUT_PER_CALL
+        if deadline is not None:
+            remaining = max(1, min(TIMEOUT_PER_CALL, deadline - time.time()))
+
         try:
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             payload = {
@@ -990,7 +1033,7 @@ def _call_groq_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3):
                     {"role": "user", "content": user_msg}
                 ]
             }
-            resp = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=20)
+            resp = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=remaining)
             if resp.status_code == 200:
                 data = resp.json()
                 choice = data["choices"][0]
@@ -1026,15 +1069,24 @@ def _call_ai_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3):
     """
     ĐIỀU PHỐI CHUỖI DỊCH AI: Gemini (1) -> Groq (2).
     Đây là hàm DUY NHẤT mà các hàm dịch thuật khác nên gọi để lấy bản dịch
-    từ AI. Nếu hàm này trả None nghĩa là cả 2 AI đều thất bại, hàm gọi cần
-    tự rơi về Google Translate (free_translate / _translate_plain đã có
-    sẵn logic này).
+    từ AI. Nếu hàm này trả None nghĩa là cả 2 AI đều thất bại (hoặc hết
+    ngân sách thời gian chung), hàm gọi cần tự rơi về Google Translate
+    (free_translate / _translate_plain đã có sẵn logic này).
+
+    Toàn bộ chuỗi Gemini+Groq dùng CHUNG 1 deadline (AI_TOTAL_TIME_BUDGET
+    giây tính từ lúc bắt đầu) để không bao giờ vượt quá thời gian gunicorn
+    cho phép xử lý 1 request -> tránh lỗi "WORKER TIMEOUT" làm mất trắng
+    bản dịch.
     """
-    translated = _call_gemini_chat(system_prompt, user_msg, max_tokens=max_tokens, temperature=temperature)
+    deadline = time.time() + AI_TOTAL_TIME_BUDGET
+
+    translated = _call_gemini_chat(system_prompt, user_msg, max_tokens=max_tokens,
+                                    temperature=temperature, deadline=deadline)
     if translated:
         return translated
 
-    translated = _call_groq_chat(system_prompt, user_msg, max_tokens=max_tokens, temperature=temperature)
+    translated = _call_groq_chat(system_prompt, user_msg, max_tokens=max_tokens,
+                                  temperature=temperature, deadline=deadline)
     if translated:
         return translated
 
