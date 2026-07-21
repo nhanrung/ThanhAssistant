@@ -98,6 +98,30 @@ def _github_headers():
     }
 
 
+def _github_list_dir(repo_path):
+    """
+    Liệt kê tên các file trong 1 thư mục của repo GitHub (Contents API).
+    Trả về list tên file, hoặc None nếu gọi API thất bại (mất mạng,
+    GitHub sập...). Dùng để biết đầy đủ danh sách file 'learning_log_*'
+    hiện có trên GitHub mà không cần đoán trước tên user.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{repo_path}"
+    try:
+        resp = requests.get(
+            url, headers=_github_headers(),
+            params={"ref": GITHUB_BRANCH}, timeout=10
+        )
+        if resp.status_code == 200:
+            payload = resp.json()
+            return [item["name"] for item in payload if item.get("type") == "file"]
+        else:
+            print(f"GitHub LIST '{repo_path}' lỗi {resp.status_code}: {resp.text[:200]}")
+            return None
+    except Exception as e:
+        print(f"Lỗi gọi GitHub LIST '{repo_path}': {str(e)}")
+        return None
+
+
 def _github_get_file(repo_path):
     """
     Đọc 1 file từ repo GitHub qua Contents API.
@@ -2434,6 +2458,43 @@ def check_grammar_with_languagetool(text, is_eng):
 @app.route('/')
 def index():
     return render_template('index.html')
+
+
+@app.route('/api/sync_all_cache', methods=['GET'])
+def api_sync_all_cache():
+    """
+    "Đánh thức" server này và ép nó tự làm mới TOÀN BỘ cache cục bộ
+    (danh sách user + mọi file nhật ký học) theo đúng bản mới nhất trên
+    GitHub — kể cả khi KHÔNG có ai thật sự đăng nhập/mở app.
+
+    LÝ DO CÓ ENDPOINT NÀY: cache cục bộ trước đây chỉ được làm mới khi
+    có người dùng thật sự truy cập ĐÚNG server đó (xem load_users_db,
+    load_data). Nếu cả nhà chỉ dùng URL Render, cache trên PythonAnywhere
+    sẽ không tự cập nhật cho tới khi có ai mở đúng URL PythonAnywhere.
+    Endpoint này cho phép dùng 1 dịch vụ ping/cron MIỄN PHÍ bên ngoài
+    (UptimeRobot, cron-job.org, GitHub Actions cron...) gọi định kỳ (ví
+    dụ mỗi 10-15 phút) tới URL này của CẢ 2 server -> biến cả 2 thành
+    "bản sao lưu nóng" luôn cập nhật, sẵn sàng dùng ngay nếu server kia
+    hoặc GitHub gặp sự cố, mà không cần tính năng Scheduled Task trả phí
+    của PythonAnywhere.
+
+    Chỉ đọc + ghi cache cục bộ, không trả về nội dung dữ liệu thật (chỉ
+    trả về số lượng) nên an toàn để không cần bảo vệ bằng mật khẩu.
+    """
+    users_db = load_users_db()   # tự ghi cache cục bộ (write-through đã có)
+    synced_logs = 0
+    filenames = _github_list_dir(GITHUB_DATA_PATH) if _github_storage_configured() else None
+    if filenames:
+        for fname in filenames:
+            if fname.startswith('learning_log_') and fname.endswith('.json'):
+                uname = fname[len('learning_log_'):-len('.json')]
+                load_data(uname)   # tự ghi cache cục bộ (write-through đã có)
+                synced_logs += 1
+    return jsonify({
+        "status": "success",
+        "synced_users_count": len(users_db),
+        "synced_logs_count": synced_logs
+    })
 
 
 # ============================================================
