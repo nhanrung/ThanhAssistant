@@ -1,6 +1,6 @@
 {
     "anh": {
-        "password": "22032018",
+        "password": "scrypt:32768:8:1$SDbhzGDJN0Pzea7R$06800d92cc1bb73fdc5e0eb2dd9e525f27d405b0a11757fbaa3ee36f96568116cfc86c7a5d1ed8f4cbe985845acc65f895700c5a8ee27674668d1a8e83a2fa4b",
         "display_name": "anh",
         "created_at": "19/07/2026 21:33"
     },
