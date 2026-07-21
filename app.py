@@ -13,6 +13,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from flask import Flask, request, jsonify, render_template
+from werkzeug.security import generate_password_hash, check_password_hash
 
 try:
     import eng_to_ipa as ipa
@@ -25,7 +26,13 @@ app = Flask(__name__)
 # ============================================================
 # CẤU HÌNH HỆ THỐNG
 # ============================================================
-SYSTEM_PASSWORD = "th@nh341978"   # Mật khẩu hệ thống chung (admin dùng khi đăng nhập lớp 1)
+SYSTEM_PASSWORD = os.environ.get("SYSTEM_PASSWORD", "th@nh341978")   # Mật khẩu hệ thống chung (admin dùng khi đăng nhập lớp 1)
+# Ưu tiên đọc từ biến môi trường SYSTEM_PASSWORD (đặt trong dashboard
+# Render / PythonAnywhere) để không lộ mật khẩu admin ngay trong source
+# code. Giá trị cũ được giữ làm fallback -> nếu bạn CHƯA khai báo biến
+# môi trường này trên server, app vẫn chạy y hệt như trước (không đổi
+# hành vi). Khi đã set biến môi trường, fallback này sẽ không được dùng
+# tới nữa và có thể xoá đi để bắt buộc dùng biến môi trường.
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR  = os.path.join(BASE_DIR, 'userdata')
@@ -526,6 +533,32 @@ def _local_save_json(filepath, data):
         json.dump(data, f, ensure_ascii=False, indent=4)
 
 
+def _hash_password(plain_password):
+    """Băm mật khẩu bằng werkzeug (thuật toán mặc định: pbkdf2:sha256 + salt)."""
+    return generate_password_hash(plain_password)
+
+
+def _is_hashed(stored_value):
+    """Nhận diện chuỗi đã là hash werkzeug hay còn là mật khẩu plaintext cũ."""
+    return isinstance(stored_value, str) and (
+        stored_value.startswith('pbkdf2:') or
+        stored_value.startswith('scrypt:') or
+        stored_value.startswith('argon2:')
+    )
+
+
+def _verify_user_password(stored_value, provided_password):
+    """
+    So khớp mật khẩu, hỗ trợ cả 2 dạng lưu trữ:
+    - Đã hash (dữ liệu mới): dùng check_password_hash.
+    - Còn plaintext (dữ liệu cũ từ trước khi có bản vá này): so sánh trực
+      tiếp để tài khoản cũ vẫn đăng nhập được bình thường, không bị gãy.
+    """
+    if _is_hashed(stored_value):
+        return check_password_hash(stored_value, provided_password)
+    return stored_value == provided_password
+
+
 def load_users_db():
     """
     Tải danh sách user con.
@@ -640,7 +673,7 @@ def verify_request_password(req_data_or_args):
     if username:
         users_db = load_users_db()
         if username in users_db:
-            return users_db[username].get('password') == provided_password
+            return _verify_user_password(users_db[username].get('password', ''), provided_password)
     return False
 
 def verify_admin_password(req_data_or_args):
@@ -2321,7 +2354,14 @@ def api_verify_password():
     users_db = load_users_db()
     if sys_username in users_db:
         user_info = users_db[sys_username]
-        if user_info.get('password') == password:
+        stored_password = user_info.get('password', '')
+        if _verify_user_password(stored_password, password):
+            # Tự động nâng cấp mật khẩu plaintext cũ (từ trước khi có hash)
+            # thành dạng đã hash ngay khi xác thực thành công, để dữ liệu
+            # dần được vá mà không cần admin phải đổi lại từng mật khẩu.
+            if not _is_hashed(stored_password):
+                users_db[sys_username]['password'] = _hash_password(password)
+                save_users_db(users_db)
             return jsonify({
                 "status": "success",
                 "role": "user",
@@ -2387,7 +2427,7 @@ def api_admin_create_user():
     created_at = datetime.now(tz_vn).strftime("%d/%m/%Y %H:%M")
 
     users_db[new_username] = {
-        "password": new_password,
+        "password": _hash_password(new_password),
         "display_name": display_name if display_name else new_username.upper(),
         "created_at": created_at
     }
@@ -2448,7 +2488,7 @@ def api_admin_update_user_password():
     if target_user not in users_db:
         return jsonify({"status": "error", "message": "Người dùng không tồn tại!"}), 404
 
-    users_db[target_user]['password'] = new_password
+    users_db[target_user]['password'] = _hash_password(new_password)
     save_users_db(users_db)
     return jsonify({"status": "success", "message": "Đổi mật khẩu thành công!"})
 
