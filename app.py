@@ -101,8 +101,16 @@ def _github_headers():
 def _github_get_file(repo_path):
     """
     Đọc 1 file từ repo GitHub qua Contents API.
-    Trả về dict {"text": <nội dung file dạng str>, "sha": <sha file>}
-    hoặc None nếu file chưa tồn tại / có lỗi.
+
+    Trả về dict với 3 khả năng, PHÂN BIỆT RÕ giữa "file không tồn tại"
+    (hợp lệ, ví dụ user mới chưa có log) và "gọi GitHub bị lỗi" (mất
+    mạng, timeout, GitHub sập, token sai...) — 2 trường hợp cũ trước đây
+    bị gộp chung thành None, khiến khi GitHub sập, chương trình tưởng
+    nhầm là "chưa có dữ liệu" và xoá sạch mọi thứ hiển thị cho người
+    dùng thay vì dùng bản cache cục bộ:
+        {"found": True,  "error": False, "text": "...", "sha": "..."}  -> đọc được
+        {"found": False, "error": False, "text": None,  "sha": None }  -> 404, file thật sự chưa có
+        {"found": False, "error": True,  "text": None,  "sha": None }  -> lỗi gọi API, KHÔNG phải là "chưa có"
     """
     url = f"{GITHUB_API_BASE}/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{repo_path}"
     try:
@@ -117,15 +125,15 @@ def _github_get_file(repo_path):
             text = base64.b64decode(raw_b64).decode("utf-8") if raw_b64 else ""
             if sha:
                 _GITHUB_SHA_CACHE[repo_path] = sha
-            return {"text": text, "sha": sha}
+            return {"found": True, "error": False, "text": text, "sha": sha}
         elif resp.status_code == 404:
-            return None
+            return {"found": False, "error": False, "text": None, "sha": None}
         else:
             print(f"GitHub GET '{repo_path}' lỗi {resp.status_code}: {resp.text[:200]}")
-            return None
+            return {"found": False, "error": True, "text": None, "sha": None}
     except Exception as e:
         print(f"Lỗi gọi GitHub GET '{repo_path}': {str(e)}")
-        return None
+        return {"found": False, "error": True, "text": None, "sha": None}
 
 
 def _github_put_file(repo_path, text_content, commit_message,
@@ -527,10 +535,77 @@ def _local_load_json(filepath, default):
 
 
 def _local_save_json(filepath, data):
-    """Ghi JSON xuống đĩa cục bộ — chỉ dùng khi chưa cấu hình GitHub (dự phòng)."""
+    """Ghi JSON xuống đĩa cục bộ — dùng làm bản cache dự phòng song song với GitHub."""
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(filepath, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
+
+
+# ------------------------------------------------------------
+# HÀNG ĐỢI ĐỒNG BỘ LẠI GITHUB (khi GitHub bị lỗi/mất mạng)
+# ------------------------------------------------------------
+# Mọi file dữ liệu (danh sách user, nhật ký học...) đều được ghi xuống
+# đĩa cục bộ TRƯỚC (xem _local_save_json ở trên), sau đó mới ghi lên
+# GitHub. Nếu bước ghi GitHub thất bại, file đó được ghi tên vào
+# '_pending_sync.json' -> lần request kế tiếp gọi tới bất kỳ hàm
+# load/save dữ liệu nào cũng sẽ thử đồng bộ lại các file đang chờ này
+# lên GitHub, để khi GitHub hoạt động trở lại thì 2 nguồn (GitHub +
+# cache cục bộ trên PythonAnywhere) tự khớp lại với nhau mà không cần
+# admin phải làm gì thủ công.
+PENDING_SYNC_FILE = os.path.join(DATA_DIR, '_pending_sync.json')
+_last_pending_flush_attempt = 0
+_PENDING_FLUSH_COOLDOWN_SECONDS = 60   # tránh gọi GitHub liên tục mỗi request khi đang sập kéo dài
+
+
+def _mark_pending_sync(repo_path, local_filepath, commit_message):
+    """Ghi nhận 1 file chưa đồng bộ lên GitHub được, để thử lại sau."""
+    pending = _local_load_json(PENDING_SYNC_FILE, {})
+    pending[repo_path] = {"local_file": local_filepath, "commit_message": commit_message}
+    _local_save_json(PENDING_SYNC_FILE, pending)
+
+
+def _clear_pending_sync(repo_path):
+    """Bỏ đánh dấu 1 file khỏi hàng đợi sau khi đã đồng bộ GitHub thành công."""
+    pending = _local_load_json(PENDING_SYNC_FILE, {})
+    if repo_path in pending:
+        del pending[repo_path]
+        _local_save_json(PENDING_SYNC_FILE, pending)
+
+
+def _flush_pending_sync():
+    """
+    Thử đồng bộ lại tất cả file đang chờ (do lần trước ghi GitHub thất
+    bại) lên GitHub. Được gọi ở đầu mỗi hàm load/save dữ liệu -> tự
+    "chữa lành" ngay khi GitHub hoạt động trở lại, không cần chờ admin
+    thao tác thủ công. Có cooldown để không làm chậm mọi request nếu
+    GitHub đang sập kéo dài.
+    """
+    global _last_pending_flush_attempt
+    if not _github_storage_configured():
+        return
+    now = time.time()
+    if now - _last_pending_flush_attempt < _PENDING_FLUSH_COOLDOWN_SECONDS:
+        return
+    _last_pending_flush_attempt = now
+
+    pending = _local_load_json(PENDING_SYNC_FILE, {})
+    if not pending:
+        return
+    print(f"[ĐỒNG BỘ] Có {len(pending)} file đang chờ đồng bộ lên GitHub -> đang thử lại...")
+    for repo_path, info in list(pending.items()):
+        local_file = info.get("local_file")
+        commit_message = info.get("commit_message", f"Đồng bộ lại {repo_path} sau khi GitHub khôi phục")
+        data = _local_load_json(local_file, None)
+        if data is None:
+            _clear_pending_sync(repo_path)
+            continue
+        text = json.dumps(data, ensure_ascii=False, indent=4)
+        ok = _github_put_file(repo_path, text, commit_message, max_retries=1, timeout=15)
+        if ok:
+            _clear_pending_sync(repo_path)
+            print(f"[ĐỒNG BỘ] Đã đồng bộ lại thành công lên GitHub: {repo_path}")
+        else:
+            print(f"[ĐỒNG BỘ] Vẫn chưa đồng bộ được: {repo_path} (sẽ thử lại ở request sau)")
 
 
 def _hash_password(plain_password):
@@ -563,37 +638,50 @@ def load_users_db():
     """
     Tải danh sách user con.
     Ưu tiên đọc từ file 'userdata/_users.json' trong repo GitHub (bền
-    vững trên mọi server). Nếu chưa cấu hình GitHub, đọc từ đĩa cục bộ.
+    vững trên mọi server). Nếu GitHub bị lỗi (mất mạng, GitHub sập, token
+    sai...) thì đọc từ bản cache cục bộ (file cùng nội dung được lưu mỗi
+    lần ghi thành công gần nhất) để chương trình vẫn dùng được thay vì
+    hiện ra trống trơn. Nếu file thật sự chưa tồn tại (404, hợp lệ) thì
+    trả về rỗng như bình thường.
     """
+    _flush_pending_sync()
     if _github_storage_configured():
         result = _github_get_file(f"{GITHUB_DATA_PATH}/_users.json")
-        if result is None:
+        if result["error"]:
+            print("[CẢNH BÁO] Không đọc được _users.json từ GitHub (lỗi kết nối/API) -> dùng bản cache cục bộ.")
+            return _local_load_json(USERS_FILE, {})
+        if not result["found"]:
             return {}
         try:
             return json.loads(result["text"]) if result["text"].strip() else {}
         except Exception:
-            print("Lỗi đọc _users.json từ GitHub (JSON hỏng) -> trả về danh sách rỗng.")
-            return {}
+            print("Lỗi đọc _users.json từ GitHub (JSON hỏng) -> dùng bản cache cục bộ.")
+            return _local_load_json(USERS_FILE, {})
     return _local_load_json(USERS_FILE, {})
 
 
 def save_users_db(users_db):
     """
     Lưu danh sách user con.
-    Ưu tiên ghi lên file 'userdata/_users.json' trong repo GitHub. Nếu
-    ghi GitHub thất bại (mất mạng, token sai...), tự động ghi tạm xuống
-    đĩa cục bộ để không mất thao tác của người dùng ngay lúc đó.
+    Luôn ghi 1 bản cache xuống đĩa cục bộ TRƯỚC (để luôn có bản mới nhất
+    sẵn sàng dùng nếu GitHub sập lúc đọc sau này), rồi mới ghi lên GitHub
+    (nguồn chính, bền vững qua các lần deploy/restart). Nếu ghi GitHub
+    thất bại, bản cache cục bộ vừa ghi vẫn đảm bảo không mất thao tác của
+    người dùng ngay tại thời điểm đó, và file được đưa vào hàng đợi để
+    tự đồng bộ lại lên GitHub ngay khi GitHub hoạt động trở lại.
     """
-    text = json.dumps(users_db, ensure_ascii=False, indent=4)
-    if _github_storage_configured():
-        ok = _github_put_file(
-            f"{GITHUB_DATA_PATH}/_users.json", text,
-            "Cập nhật danh sách tài khoản người học"
-        )
-        if ok:
-            return
-        print("[CẢNH BÁO] Ghi _users.json lên GitHub thất bại -> lưu tạm cục bộ.")
+    _flush_pending_sync()
     _local_save_json(USERS_FILE, users_db)
+    repo_path = f"{GITHUB_DATA_PATH}/_users.json"
+    if _github_storage_configured():
+        text = json.dumps(users_db, ensure_ascii=False, indent=4)
+        ok = _github_put_file(repo_path, text, "Cập nhật danh sách tài khoản người học")
+        if ok:
+            _clear_pending_sync(repo_path)
+        else:
+            print("[CẢNH BÁO] Ghi _users.json lên GitHub thất bại -> đã có bản cache cục bộ dự phòng, đưa vào hàng đợi đồng bộ lại.")
+            _mark_pending_sync(repo_path, USERS_FILE, "Cập nhật danh sách tài khoản người học")
+
 
 def is_admin_user(sys_username):
     """Kiểm tra xem tài khoản có phải admin không (username kết thúc bằng _admin)."""
@@ -685,42 +773,53 @@ def load_data(username):
     """
     Tải nhật ký học của 1 người dùng.
     Ưu tiên đọc từ 'userdata/learning_log_<username>.json' trong repo
-    GitHub. Nếu chưa cấu hình GitHub, đọc từ đĩa cục bộ.
+    GitHub. Nếu GitHub bị lỗi (mất mạng, GitHub sập, token sai...) thì
+    đọc từ bản cache cục bộ thay vì trả về rỗng — để người học vẫn xem
+    và tiếp tục học được ngay cả khi GitHub đang gặp sự cố. Nếu file
+    thật sự chưa tồn tại (404, ví dụ user mới chưa học bài nào) thì trả
+    về rỗng như bình thường.
     """
+    _flush_pending_sync()
     uname = username.lower()
+    filename = os.path.join(DATA_DIR, f'learning_log_{uname}.json')
     if _github_storage_configured():
         result = _github_get_file(f"{GITHUB_DATA_PATH}/learning_log_{uname}.json")
-        if result is None:
+        if result["error"]:
+            print(f"[CẢNH BÁO] Không đọc được learning_log_{uname}.json từ GitHub (lỗi kết nối/API) -> dùng bản cache cục bộ.")
+            return _local_load_json(filename, [])
+        if not result["found"]:
             return []
         try:
             return json.loads(result["text"]) if result["text"].strip() else []
         except Exception:
-            print(f"Lỗi đọc learning_log_{uname}.json từ GitHub (JSON hỏng) -> trả về danh sách rỗng.")
-            return []
-    filename = os.path.join(DATA_DIR, f'learning_log_{uname}.json')
+            print(f"Lỗi đọc learning_log_{uname}.json từ GitHub (JSON hỏng) -> dùng bản cache cục bộ.")
+            return _local_load_json(filename, [])
     return _local_load_json(filename, [])
 
 
 def save_data(username, data):
     """
     Lưu nhật ký học của 1 người dùng.
-    Ưu tiên ghi lên 'userdata/learning_log_<username>.json' trong repo
-    GitHub — đây là bước chạy MỖI KHI người học thêm/sửa/xoá 1 câu. Nếu
-    ghi GitHub thất bại, tự động ghi tạm xuống đĩa cục bộ để không mất
-    thao tác của người dùng ngay lúc đó.
+    Luôn ghi 1 bản cache xuống đĩa cục bộ TRƯỚC (đảm bảo luôn có bản mới
+    nhất để dùng nếu GitHub sập lúc đọc sau này), rồi mới ghi lên GitHub
+    — đây là bước chạy MỖI KHI người học thêm/sửa/xoá 1 câu. Nếu ghi
+    GitHub thất bại, bản cache cục bộ vừa ghi vẫn đảm bảo không mất thao
+    tác của người dùng ngay tại thời điểm đó, và file được đưa vào hàng
+    đợi để tự đồng bộ lại lên GitHub ngay khi GitHub hoạt động trở lại.
     """
+    _flush_pending_sync()
     uname = username.lower()
-    text = json.dumps(data, ensure_ascii=False, indent=4)
-    if _github_storage_configured():
-        ok = _github_put_file(
-            f"{GITHUB_DATA_PATH}/learning_log_{uname}.json", text,
-            f"Cập nhật nhật ký học của '{uname}'"
-        )
-        if ok:
-            return
-        print(f"[CẢNH BÁO] Ghi learning_log_{uname}.json lên GitHub thất bại -> lưu tạm cục bộ.")
     filename = os.path.join(DATA_DIR, f'learning_log_{uname}.json')
     _local_save_json(filename, data)
+    repo_path = f"{GITHUB_DATA_PATH}/learning_log_{uname}.json"
+    if _github_storage_configured():
+        text = json.dumps(data, ensure_ascii=False, indent=4)
+        ok = _github_put_file(repo_path, text, f"Cập nhật nhật ký học của '{uname}'")
+        if ok:
+            _clear_pending_sync(repo_path)
+        else:
+            print(f"[CẢNH BÁO] Ghi learning_log_{uname}.json lên GitHub thất bại -> đã có bản cache cục bộ dự phòng, đưa vào hàng đợi đồng bộ lại.")
+            _mark_pending_sync(repo_path, filename, f"Cập nhật nhật ký học của '{uname}'")
 
 def clean_html_for_spellcheck(text):
     """
