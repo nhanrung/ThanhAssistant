@@ -5,7 +5,7 @@
         "created_at": "19/07/2026 21:33"
     },
     "lam": {
-        "password": "02082013",
+        "password": "scrypt:32768:8:1$BRY6M84SbyQp6cin$443b1cbe4305bdcaa05734c6dc83bd31ab4e84723a2140c9d0d9127132bb8e3f47931d1909ee3e7acea27aecfdd3b6ec16f62982d954dc93305a04b5282d29d8",
         "display_name": "lam",
         "created_at": "19/07/2026 21:33"
     },
