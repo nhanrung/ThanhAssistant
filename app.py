@@ -640,9 +640,18 @@ def load_users_db():
     Ưu tiên đọc từ file 'userdata/_users.json' trong repo GitHub (bền
     vững trên mọi server). Nếu GitHub bị lỗi (mất mạng, GitHub sập, token
     sai...) thì đọc từ bản cache cục bộ (file cùng nội dung được lưu mỗi
-    lần ghi thành công gần nhất) để chương trình vẫn dùng được thay vì
-    hiện ra trống trơn. Nếu file thật sự chưa tồn tại (404, hợp lệ) thì
-    trả về rỗng như bình thường.
+    lần ghi/đọc thành công gần nhất) để chương trình vẫn dùng được thay
+    vì hiện ra trống trơn. Nếu file thật sự chưa tồn tại (404, hợp lệ)
+    thì trả về rỗng như bình thường.
+
+    LƯU Ý QUAN TRỌNG: mỗi lần đọc THÀNH CÔNG từ GitHub, dữ liệu cũng được
+    ghi đè xuống cache cục bộ CỦA SERVER ĐANG XỬ LÝ REQUEST NÀY. Lý do:
+    PythonAnywhere và Render là 2 server độc lập, ổ đĩa cục bộ không dùng
+    chung -> nếu thay đổi chỉ đến từ server A (ví dụ Render), cache cục
+    bộ của server B (PythonAnywhere) sẽ không tự biết mà cập nhật trừ khi
+    có ai đó đọc/ghi dữ liệu ngay trên chính server B. Ghi đè cache ngay
+    lúc đọc đảm bảo hễ server nào có người mở app lên là cache của nó tự
+    làm mới theo đúng bản mới nhất trên GitHub.
     """
     _flush_pending_sync()
     if _github_storage_configured():
@@ -653,7 +662,9 @@ def load_users_db():
         if not result["found"]:
             return {}
         try:
-            return json.loads(result["text"]) if result["text"].strip() else {}
+            users_db = json.loads(result["text"]) if result["text"].strip() else {}
+            _local_save_json(USERS_FILE, users_db)   # đồng bộ cache cục bộ theo GitHub
+            return users_db
         except Exception:
             print("Lỗi đọc _users.json từ GitHub (JSON hỏng) -> dùng bản cache cục bộ.")
             return _local_load_json(USERS_FILE, {})
@@ -778,6 +789,11 @@ def load_data(username):
     và tiếp tục học được ngay cả khi GitHub đang gặp sự cố. Nếu file
     thật sự chưa tồn tại (404, ví dụ user mới chưa học bài nào) thì trả
     về rỗng như bình thường.
+
+    Mỗi lần đọc THÀNH CÔNG từ GitHub cũng ghi đè xuống cache cục bộ của
+    server đang xử lý request này (xem giải thích chi tiết trong
+    load_users_db) — để cache của PythonAnywhere/Render tự cập nhật theo
+    GitHub dù thay đổi được lưu từ server kia.
     """
     _flush_pending_sync()
     uname = username.lower()
@@ -790,7 +806,9 @@ def load_data(username):
         if not result["found"]:
             return []
         try:
-            return json.loads(result["text"]) if result["text"].strip() else []
+            data = json.loads(result["text"]) if result["text"].strip() else []
+            _local_save_json(filename, data)   # đồng bộ cache cục bộ theo GitHub
+            return data
         except Exception:
             print(f"Lỗi đọc learning_log_{uname}.json từ GitHub (JSON hỏng) -> dùng bản cache cục bộ.")
             return _local_load_json(filename, [])
