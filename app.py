@@ -490,6 +490,8 @@ def _get_request_ai_deadline():
 CIRCUIT_BREAKER_THRESHOLD = 2   # số lỗi Timeout/429 LIÊN TIẾP để ngắt mạch
 
 _circuit_breaker_local = threading.local()
+_cb_lock = threading.Lock()   # bảo vệ việc cập nhật state khi state được
+                               # CHIA SẺ giữa nhiều luồng (xem _bind_ai_request_context)
 
 
 def _start_request_circuit_breaker():
@@ -522,16 +524,17 @@ def _cb_record_failure(provider):
     """Ghi nhận 1 lỗi Timeout/429 của provider. Trả về True nếu lần ghi
     nhận này vừa làm mạch bị NGẮT (để hàm gọi dừng thử các key còn lại
     ngay lập tức thay vì tốn thêm thời gian)."""
-    st = _get_circuit_breaker_state()[provider]
-    st["consecutive_fails"] += 1
-    just_tripped = False
-    if st["consecutive_fails"] >= CIRCUIT_BREAKER_THRESHOLD and not st["tripped"]:
-        st["tripped"] = True
-        just_tripped = True
-        print(f"[CircuitBreaker] {provider}: {st['consecutive_fails']} lỗi "
-              f"Timeout/429 LIÊN TIẾP -> NGẮT MẠCH provider này cho TOÀN BỘ "
-              f"các chunk còn lại của request hiện tại.")
-    return just_tripped
+    with _cb_lock:
+        st = _get_circuit_breaker_state()[provider]
+        st["consecutive_fails"] += 1
+        just_tripped = False
+        if st["consecutive_fails"] >= CIRCUIT_BREAKER_THRESHOLD and not st["tripped"]:
+            st["tripped"] = True
+            just_tripped = True
+            print(f"[CircuitBreaker] {provider}: {st['consecutive_fails']} lỗi "
+                  f"Timeout/429 LIÊN TIẾP -> NGẮT MẠCH provider này cho TOÀN BỘ "
+                  f"các chunk còn lại của request hiện tại.")
+        return just_tripped
 
 
 def _cb_record_success(provider):
@@ -539,8 +542,51 @@ def _cb_record_success(provider):
     'đóng lại' mạch đã bị ngắt trong CÙNG request — 1 lần ngắt là ngắt cho
     hết request đó, tránh dao động lãng phí thời gian; mạch sẽ tự mở lại
     sạch sẽ ở request KẾ TIẾP)."""
-    st = _get_circuit_breaker_state()[provider]
-    st["consecutive_fails"] = 0
+    with _cb_lock:
+        st = _get_circuit_breaker_state()[provider]
+        st["consecutive_fails"] = 0
+
+
+# ------------------------------------------------------------
+# CHIA SẺ ngân sách thời gian + circuit breaker SANG CÁC LUỒNG WORKER
+# ------------------------------------------------------------
+# LỖI THỰC TẾ ĐÃ GẶP (khiến bảng <table> nhiều ô dịch -> worker bị
+# Gunicorn/Render KILL giữa chừng -> "chương trình không chạy được"):
+# _ai_deadline_local và _circuit_breaker_local ở trên là threading.local(),
+# nghĩa là MỖI LUỒNG (thread) có bản sao RIÊNG. Khi 1 bảng có nhiều ô cần
+# dịch fallback song song, code dùng ThreadPoolExecutor để tạo các luồng
+# WORKER MỚI — nhưng các luồng mới đó KHÔNG hề có deadline/circuit breaker
+# đã mở sẵn ở luồng chính (luồng xử lý request HTTP), nên mỗi luồng worker
+# tự ý mở 1 ngân sách 35 giây + circuit breaker "sạch" HOÀN TOÀN RIÊNG của
+# nó, rồi vẫn tiếp tục thử gọi thật Gemini/Groq (dù luồng chính đã ngắt
+# mạch từ trước) -> tổng thời gian xử lý thật của cả request (cộng dồn
+# qua nhiều luồng chạy song song, nhiều ô bảng) có thể vượt xa 35 giây dự
+# kiến ban đầu -> chạm ngưỡng WORKER TIMEOUT của Gunicorn -> worker bị
+# kill giữa chừng, request không bao giờ trả lời được.
+#
+# GIẢI PHÁP: trước khi tạo các luồng worker, luồng chính "chụp" lại đúng
+# deadline + đúng state circuit breaker của nó (_snapshot_ai_request_context),
+# rồi mỗi luồng worker GÁN LẠI (bind) đúng deadline + đúng state đó cho
+# chính nó ngay khi bắt đầu chạy (_bind_ai_request_context) — thay vì tự
+# tạo mới. Nhờ vậy toàn bộ luồng (kể cả chạy song song) LUÔN dùng CHUNG 1
+# ngân sách thời gian + CHUNG 1 trạng thái circuit breaker với luồng
+# chính, đúng như thiết kế ban đầu, không bao giờ vượt AI_TOTAL_TIME_BUDGET.
+def _snapshot_ai_request_context():
+    """Gọi ở LUỒNG CHÍNH, ngay TRƯỚC khi tạo ThreadPoolExecutor, để lấy
+    (deadline, state_circuit_breaker) hiện tại cần truyền sang các luồng
+    worker."""
+    return (_get_request_ai_deadline(), _get_circuit_breaker_state())
+
+
+def _bind_ai_request_context(ctx):
+    """Gọi ở ĐẦU mỗi hàm chạy BÊN TRONG 1 luồng worker (ThreadPoolExecutor)
+    để gán đúng deadline + đúng state circuit breaker đã chụp từ luồng
+    chính (`ctx` = kết quả của _snapshot_ai_request_context) cho luồng
+    hiện tại, thay vì để luồng đó tự tạo ngân sách/circuit breaker mới
+    hoàn toàn riêng của nó."""
+    deadline, cb_state = ctx
+    _ai_deadline_local.value = deadline
+    _circuit_breaker_local.state = cb_state
 
 # ============================================================
 # QUẢN LÝ DANH SÁCH USER CON
@@ -2244,7 +2290,17 @@ def translate_preserving_html(html_text, source_lang, target_lang, context=None)
             print(f"[Smart Batching - HTML] {len(fail_positions)}/{len(tagged_texts)} dòng có định dạng "
                   f"bị AI làm hỏng thẻ số hoặc lỗi -> fallback dịch riêng SONG SONG cho các dòng này...")
 
+            # Chụp lại deadline + circuit breaker của LUỒNG CHÍNH trước khi
+            # tạo các luồng worker bên dưới, để mọi luồng worker dùng CHUNG
+            # đúng 1 ngân sách thời gian + đúng 1 trạng thái circuit breaker
+            # với luồng chính (xem ghi chú tại _snapshot_ai_request_context),
+            # thay vì mỗi luồng mới tự mở ngân sách/circuit breaker riêng
+            # của nó -> vốn là nguyên nhân khiến việc dịch bảng nhiều ô có
+            # thể chạy vượt xa AI_TOTAL_TIME_BUDGET và làm worker bị KILL.
+            _ai_ctx = _snapshot_ai_request_context()
+
             def _fallback_one(pos):
+                _bind_ai_request_context(_ai_ctx)
                 i = tagged_idx[pos]
                 info = para_infos[i]
                 fallback_segments = [{"text": c["text"], "tags": c["tags"], "is_br": False} for c in info["chunks"]]
