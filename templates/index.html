@@ -28,6 +28,39 @@
             box-shadow: 0 0 0 1px #facc15;
         }
         .word-span { display: inline-block; transition: background-color 0.05s ease; }
+
+        /* ============================================================
+           HIỂN THỊ BẢNG (KHUNG KẺ Ô) — áp dụng cho cả ô nhập liệu
+           (rich-input-box), khung xem/sửa trong modal, và khu vực hiển
+           thị kết quả tiếng Anh/tiếng Việt (content-text). Đảm bảo khi
+           dán bảng từ Word/Excel hoặc chèn bảng bằng nút "Chèn bảng",
+           bảng LUÔN hiển thị rõ khung viền — kể cả khi bản dịch tiếng
+           Việt không có sẵn thuộc tính border riêng.
+        ============================================================ */
+        .rich-input-box table,
+        .content-text table,
+        #now-reading table {
+            border-collapse: collapse;
+            margin: 6px 0;
+            max-width: 100%;
+        }
+        .rich-input-box table td,
+        .rich-input-box table th,
+        .content-text table td,
+        .content-text table th,
+        #now-reading table td,
+        #now-reading table th {
+            border: 1px solid #6b7280;
+            padding: 4px 10px;
+            text-align: left;
+            vertical-align: top;
+        }
+        .rich-input-box table th,
+        .content-text table th,
+        #now-reading table th {
+            background-color: #f3f4f6;
+            font-weight: 700;
+        }
     </style>
 </head>
 <body class="h-screen w-screen flex flex-col overflow-hidden">
@@ -119,6 +152,7 @@
                     <button type="button" onclick="formatDoc('italic')" class="px-3 py-1 hover:bg-gray-200 rounded border bg-white shadow-sm italic">I</button>
                     <button type="button" onclick="formatDoc('boldAndItalic')" class="px-3 py-1 hover:bg-gray-200 rounded border bg-white shadow-sm font-bold italic">B&I</button>
                     <button type="button" onclick="formatDoc('strikeThrough')" class="px-3 py-1 hover:bg-gray-200 rounded border bg-white shadow-sm line-through">S</button>
+                    <button type="button" onclick="insertTable()" title="Chèn bảng có khung — khi dịch sẽ tự giữ nguyên khung và số ô" class="px-3 py-1 hover:bg-gray-200 rounded border bg-white shadow-sm"><i class="fa-solid fa-table"></i> Bảng</button>
                     <span id="writing-for-badge" class="hidden ml-auto bg-blue-100 text-blue-700 text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0">Đang nhập cho: <span id="writing-for-name"></span></span>
                 </div>
                 <div class="flex flex-col md:flex-row gap-3">
@@ -542,7 +576,7 @@ function renderLogs() {
         viItem.className = baseCls;
         viItem.onclick = () => { selectedIndex = originalIndex; renderLogs(); };
         const viContent = document.createElement("div");
-        viContent.className = "text-sm text-gray-700";
+        viContent.className = "content-text text-sm text-gray-700";
         viContent.innerHTML = log.vi;
         viItem.appendChild(viContent);
         viContainer.appendChild(viItem);
@@ -862,6 +896,39 @@ function initVoiceSelection() {
 }
 
 function formatDoc(command) { document.execCommand(command, false, null); document.getElementById("text-input").focus(); }
+
+// ============================================================
+// CHÈN BẢNG CÓ KHUNG (border) VÀO Ô NHẬP LIỆU
+// Khi bấm nút "DỊCH & LƯU", nếu nội dung có chứa bảng, server sẽ TỰ
+// ĐỘNG dịch riêng từng ô và GIỮ NGUYÊN khung/số hàng/số cột — không cần
+// làm gì thêm ở giao diện. Người dùng cũng có thể dán trực tiếp 1 bảng
+// đã có khung (copy từ Word/Excel) vào ô nhập liệu, trình duyệt sẽ tự
+// giữ nguyên cấu trúc bảng khi dán.
+// ============================================================
+function insertTable() {
+    const rowsInput = prompt("Số hàng của bảng:", "2");
+    if (rowsInput === null) return;
+    const colsInput = prompt("Số cột của bảng:", "3");
+    if (colsInput === null) return;
+
+    const rows = Math.max(1, Math.min(20, parseInt(rowsInput, 10) || 2));
+    const cols = Math.max(1, Math.min(10, parseInt(colsInput, 10) || 3));
+
+    const cellStyle = "border:1px solid #6b7280;padding:4px 10px;";
+    let html = '<table style="border-collapse:collapse;">';
+    for (let r = 0; r < rows; r++) {
+        html += "<tr>";
+        for (let c = 0; c < cols; c++) {
+            html += `<td style="${cellStyle}">&nbsp;</td>`;
+        }
+        html += "</tr>";
+    }
+    html += "</table><br>";
+
+    const inputBox = document.getElementById("text-input");
+    inputBox.focus();
+    document.execCommand("insertHTML", false, html);
+}
 
 function startVoiceRecord(langCode) {
     const rec = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
