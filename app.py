@@ -2935,6 +2935,27 @@ def api_translate():
 
 @app.route('/api/edit', methods=['POST'])
 def api_edit():
+    """
+    Sửa 1 câu học đã lưu.
+
+    QUY TẮC (giống hệt quy trình "Lưu và Dịch" — /api/translate — nhưng
+    chỉ áp dụng cho riêng câu/cụm vừa sửa, không đụng tới các câu khác
+    trong nhật ký):
+      - Nếu phần TIẾNG ANH bị thay đổi -> coi như người dùng vừa nhập 1
+        câu tiếng Anh mới: tự động DỊCH LẠI sang tiếng Việt bằng AI
+        (smart_translate), tính lại PHIÊN ÂM IPA, và CHẤM NGỮ PHÁP
+        (check_grammar_with_languagetool) y hệt như khi bấm "Dịch & Lưu".
+        Phần tiếng Việt người dùng gõ tay trong ô sửa (nếu có) sẽ được
+        THAY THẾ bằng bản dịch AI mới này, để đảm bảo 2 cột luôn khớp
+        nghĩa với câu tiếng Anh mới — đúng như hành vi của "Lưu và Dịch".
+      - Nếu phần tiếng Anh KHÔNG đổi (người dùng chỉ sửa phần tiếng
+        Việt) -> GIỮ NGUYÊN câu tiếng Anh & phiên âm IPA cũ, KHÔNG dịch
+        lại, chỉ lưu đúng nghĩa tiếng Việt mà người dùng đã tự sửa.
+    """
+    # Mở ngân sách thời gian dùng chung cho AI (dịch/ngữ pháp) trong
+    # trường hợp cần dịch lại — dùng chung cơ chế với /api/translate.
+    _start_request_ai_deadline()
+
     req_data = request.get_json()
     if not verify_request_password(req_data):
         return jsonify({"status": "error", "message": "Truy cập trái phép!"}), 401
@@ -2943,22 +2964,57 @@ def api_edit():
     idx = req_data.get('index')
 
     log = load_data(username)
-    if 0 <= idx < len(log):
-        new_en = req_data.get('en', '').strip()
-        new_vi = req_data.get('vi', '').strip()
+    if not (isinstance(idx, int) and 0 <= idx < len(log)):
+        return jsonify({"status": "error", "message": "Không tìm thấy câu học"}), 404
+
+    old_entry = log[idx]
+    submitted_en = req_data.get('en', '').strip()
+    submitted_vi = req_data.get('vi', '').strip()
+
+    # So sánh phần tiếng Anh CŨ và MỚI sau khi đã làm sạch HTML/khoảng
+    # trắng thừa (contenteditable hay sinh ra khác biệt định dạng dù nội
+    # dung chữ không đổi) -> tránh dịch lại "oan" khi người dùng chỉ sửa
+    # phần tiếng Việt.
+    old_en_clean = re.sub(r'\s+', ' ', clean_html_for_spellcheck(old_entry.get('en', ''))).strip()
+    new_en_clean = re.sub(r'\s+', ' ', clean_html_for_spellcheck(submitted_en)).strip()
+    en_changed = (new_en_clean != old_en_clean)
+
+    grammar_result = None
+
+    if en_changed:
+        # PHẦN TIẾNG ANH BỊ SỬA -> chạy đúng quy trình "Lưu và Dịch",
+        # nhưng chỉ cho riêng câu này (lấy vài câu gần đó làm ngữ cảnh
+        # hội thoại, giống hệt api_translate).
+        context_log = [e for i, e in enumerate(log) if i != idx]
+        conversation_context = context_log[-4:] if context_log else []
+
+        translated_vi = smart_translate(submitted_en, 'en', 'vi', context=conversation_context)
+        new_vi = translated_vi if translated_vi else "(Hệ thống dịch đang bận, vui lòng thử lại sau)"
+        new_en = submitted_en
         new_ipa = get_free_ipa_pronunciation(new_en)
+        grammar_result = check_grammar_with_languagetool(new_en, True)
+    else:
+        # CHỈ SỬA PHẦN TIẾNG VIỆT -> giữ nguyên câu tiếng Anh & phiên âm
+        # cũ, không dịch lại, chỉ lưu nghĩa tiếng Việt người dùng tự sửa.
+        new_en = old_entry.get('en', '')
+        new_vi = submitted_vi
+        new_ipa = old_entry.get('ipa') or get_free_ipa_pronunciation(new_en)
 
-        log[idx]['en'] = new_en
-        log[idx]['vi'] = new_vi
-        log[idx]['ipa'] = new_ipa
+    log[idx]['en'] = new_en
+    log[idx]['vi'] = new_vi
+    log[idx]['ipa'] = new_ipa
 
-        save_data(username, log)
-        return jsonify({
-            "status": "success",
-            "data": log,
-            "updated_ipa": new_ipa
-        })
-    return jsonify({"status": "error", "message": "Không tìm thấy câu học"}), 404
+    save_data(username, log)
+
+    response_payload = {
+        "status": "success",
+        "data": log,
+        "updated_ipa": new_ipa,
+        "en_retranslated": en_changed
+    }
+    if grammar_result is not None:
+        response_payload["grammar"] = grammar_result
+    return jsonify(response_payload)
 
 
 @app.route('/api/delete', methods=['POST'])
