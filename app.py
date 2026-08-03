@@ -872,6 +872,11 @@ def clean_html_for_spellcheck(text):
     if not text:
         return ""
     cleaned = text.replace("<br>", "\n").replace("<p>", "").replace("</p>", "\n")
+    # Bảng (<table>): thêm khoảng trắng/xuống dòng ở ranh giới ô/hàng
+    # TRƯỚC KHI xoá tag, để chữ ở các ô cạnh nhau không bị dính liền vào
+    # nhau (vd "beautifulbig") khi tính phiên âm IPA / kiểm tra ngữ pháp.
+    cleaned = re.sub(r'</t[dh]>', ' ', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'</tr>', '\n', cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r'<[^>]+>', '', cleaned)            # bỏ các tag HTML còn lại
     cleaned = html_lib.unescape(cleaned)                  # &nbsp; -> ' ', &amp; -> '&', ...
     cleaned = cleaned.replace('\xa0', ' ')                # khoảng trắng không ngắt dòng -> khoảng trắng thường
@@ -2269,6 +2274,107 @@ def translate_preserving_html(html_text, source_lang, target_lang, context=None)
 
     return "".join(result_parts)
 
+def _translate_table_html(table_html, source_lang, target_lang, context=None):
+    """
+    Dịch MỘT bảng HTML (<table>...</table>), GIỮ NGUYÊN 100% cấu trúc
+    bảng — đúng số hàng/cột, đúng thẻ <table>/<tr>/<td>/<th> cùng MỌI
+    thuộc tính gốc (border, style vẽ khung, colspan, rowspan, class...).
+    CHỈ phần CHỮ bên trong từng ô được dịch. Nếu một ô có định dạng riêng
+    (đậm/nghiêng/gạch chân/gạch ngang) thì định dạng đó cũng được giữ
+    nguyên trong bản dịch của đúng ô đó.
+
+    CÁCH LÀM: lấy nội dung bên trong TỪNG ô (<td>/<th>), NỐI các ô lại
+    thành 1 chuỗi HTML duy nhất bằng dấu ngắt dòng <br> làm ranh giới,
+    rồi dùng LẠI translate_preserving_html() (đã có sẵn Smart Batching +
+    giữ định dạng) để dịch NỘI DUNG CỦA MỌI Ô chỉ trong 1 lượt xử lý —
+    thay vì gọi AI riêng cho từng ô (rất chậm với bảng nhiều ô/nhiều
+    hàng). Dịch xong, tách lại đúng số ô ban đầu và ráp trở lại đúng vị
+    trí, giữ nguyên thẻ mở/đóng + thuộc tính gốc (khung/border) của từng
+    ô — các phần khác của bảng không hề bị thay đổi.
+    """
+    cell_pattern = re.compile(r'(<t[dh]\b[^>]*>)(.*?)(</t[dh]>)', re.IGNORECASE | re.DOTALL)
+    matches = list(cell_pattern.finditer(table_html))
+    if not matches:
+        return table_html  # Không tìm thấy ô hợp lệ nào -> giữ nguyên bảng gốc
+
+    cell_inners = [m.group(2) for m in matches]
+
+    # Ghép nội dung mọi ô lại bằng <br>, dịch chung 1 lượt.
+    joined = "<br>".join(cell_inners)
+    translated_joined = (
+        translate_preserving_html(joined, source_lang, target_lang, context=context)
+        if joined.strip() else joined
+    )
+    translated_cells = re.split(r'<br\s*/?>', translated_joined, flags=re.IGNORECASE)
+
+    # Phòng trường hợp hiếm số phần tách ra không khớp số ô ban đầu (ví
+    # dụ 1 ô đã có sẵn <br> riêng bên trong làm lệch ranh giới) -> dịch
+    # lại AN TOÀN từng ô riêng lẻ để không bao giờ làm vỡ cấu trúc bảng.
+    if len(translated_cells) != len(cell_inners):
+        translated_cells = [
+            translate_preserving_html(c, source_lang, target_lang, context=context) if c.strip() else c
+            for c in cell_inners
+        ]
+
+    # Ráp lại bảng: giữ NGUYÊN thẻ mở/đóng gốc của từng ô (kèm mọi thuộc
+    # tính: border, style vẽ khung, colspan, rowspan...), chỉ thay phần
+    # chữ bên trong bằng bản dịch.
+    result = []
+    last_end = 0
+    for idx, m in enumerate(matches):
+        result.append(table_html[last_end:m.start()])
+        open_tag, close_tag = m.group(1), m.group(3)
+        result.append(open_tag + translated_cells[idx] + close_tag)
+        last_end = m.end()
+    result.append(table_html[last_end:])
+    return "".join(result)
+
+
+def _translate_text_with_tables(html_text, source_lang, target_lang, context=None):
+    """
+    Điều phối dịch cho văn bản có chứa 1 hoặc nhiều bảng (<table>) trộn
+    lẫn với chữ thường: tách các bảng ra khỏi nội dung, dịch phần chữ
+    NẰM NGOÀI bảng theo ĐÚNG cách xử lý cũ (vẫn giữ đậm/nghiêng/gạch
+    chân/ngắt dòng nếu có — KHÔNG thay đổi hành vi hiện tại), còn phần
+    NẰM TRONG mỗi bảng được dịch riêng bằng _translate_table_html() để
+    GIỮ NGUYÊN khung/border và số hàng/cột của bảng gốc. Cuối cùng ghép
+    lại đúng thứ tự ban đầu — các phần khác giữ nguyên không đổi.
+    """
+    table_pattern = re.compile(r'<table\b.*?</table>', re.IGNORECASE | re.DOTALL)
+    segments = []
+    last_end = 0
+    for m in table_pattern.finditer(html_text):
+        segments.append(("text", html_text[last_end:m.start()]))
+        segments.append(("table", m.group(0)))
+        last_end = m.end()
+    segments.append(("text", html_text[last_end:]))
+
+    result_parts = []
+    for kind, content in segments:
+        if kind == "table":
+            result_parts.append(_translate_table_html(content, source_lang, target_lang, context=context))
+            continue
+        if not content.strip():
+            result_parts.append(content)
+            continue
+        has_formatting = bool(re.search(r'<(b|strong|i|em|s|strike|del|u|br)[^>]*>', content, re.IGNORECASE))
+        if has_formatting:
+            result_parts.append(translate_preserving_html(content, source_lang, target_lang, context=context))
+            continue
+        clean_text = clean_html_for_spellcheck(content)
+        if not clean_text.strip():
+            result_parts.append(content)
+            continue
+        lines = clean_text.split('\n')
+        real_lines = [ln for ln in lines if ln.strip()]
+        if len(real_lines) <= 1:
+            result_parts.append(_translate_sentence(clean_text, source_lang, target_lang, context=context))
+        else:
+            translated_lines = _translate_lines_smart(lines, source_lang, target_lang, context=context)
+            result_parts.append("\n".join(translated_lines))
+    return "".join(result_parts)
+
+
 def _translate_sentence_atomic(clean_text, source_lang, target_lang, context=None):
     """Dịch MỘT câu/khối text thuần đã đủ ngắn (không tự chia nhỏ thêm).
     Đây là phần logic dịch câu gốc (kèm ví dụ xử lý ngữ cảnh câu trả lời
@@ -2370,6 +2476,12 @@ def smart_translate(text, source_lang, target_lang, context=None):
     theo câu nếu vẫn còn dài) và GỘP LẠI thành Smart Batching để dịch
     TOÀN BỘ trong tối thiểu số lệnh gọi AI, không bao giờ dừng lại giữa
     chừng."""
+    # CÓ BẢNG (<table> — ví dụ khung kẻ ô như copy từ Word/Excel) -> dịch
+    # riêng để GIỮ NGUYÊN khung bảng (đúng số hàng/cột, đúng border/style
+    # vẽ khung), chỉ dịch phần chữ bên trong từng ô tương ứng.
+    if re.search(r'<table\b', text, re.IGNORECASE):
+        return _translate_text_with_tables(text, source_lang, target_lang, context=context)
+
     # Kiểm tra text có chứa HTML tags định dạng không
     has_formatting = bool(re.search(r'<(b|strong|i|em|s|strike|del|u|br)[^>]*>', text, re.IGNORECASE))
 
