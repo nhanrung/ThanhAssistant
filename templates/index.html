@@ -951,6 +951,14 @@ function closeEditModal() { document.getElementById("edit-modal").classList.add(
 async function saveEditModal() {
     const newEn = document.getElementById("modal-en").innerHTML;
     const newVi = document.getElementById("modal-vi").innerHTML;
+
+    // Nếu phần tiếng Anh bị thay đổi, server sẽ tự động dịch lại (giống
+    // quy trình "Lưu và Dịch") nên có thể mất vài giây -> hiện trạng
+    // thái đang xử lý và khoá nút Lưu để tránh bấm nhiều lần.
+    const saveBtn = document.querySelector('#edit-modal button[onclick="saveEditModal()"]');
+    const originalBtnText = saveBtn ? saveBtn.innerText : "";
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.innerText = "Đang lưu..."; saveBtn.classList.add("opacity-60", "cursor-not-allowed"); }
+
     try {
         const resp = await authFetch("/api/edit", {
             method: "POST", headers: { "Content-Type": "application/json" },
@@ -959,6 +967,9 @@ async function saveEditModal() {
         const data = await resp.json();
         if (data.status === "success") { learningLogs = data.data; renderLogs(); closeEditModal(); }
     } catch(e) { console.error(e); }
+    finally {
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.innerText = originalBtnText; saveBtn.classList.remove("opacity-60", "cursor-not-allowed"); }
+    }
 }
 
 async function deleteSelectedSentence() {
