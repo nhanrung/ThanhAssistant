@@ -30,6 +30,21 @@
         .word-span { display: inline-block; transition: background-color 0.05s ease; }
 
         /* ============================================================
+           TÌM KIẾM CÂU/TỪ CŨ (phần tiếng Anh) — khung tô sáng câu học
+           đang được trỏ tới khi tìm kiếm, giúp dễ nhận ra giữa danh
+           sách dài mà KHÔNG ảnh hưởng tới các kiểu hiển thị khác.
+        ============================================================ */
+        .search-active-highlight {
+            outline: 3px solid #f59e0b !important;
+            box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.25) !important;
+            animation: search-pulse 1.4s ease-in-out 2;
+        }
+        @keyframes search-pulse {
+            0%, 100% { background-color: transparent; }
+            50% { background-color: rgba(253, 224, 71, 0.35); }
+        }
+
+        /* ============================================================
            HIỂN THỊ BẢNG (KHUNG KẺ Ô) — áp dụng cho cả ô nhập liệu
            (rich-input-box), khung xem/sửa trong modal, và khu vực hiển
            thị kết quả tiếng Anh/tiếng Việt (content-text). Đảm bảo khi
@@ -196,6 +211,18 @@
         <div id="admin-tabs" class="hidden flex items-center gap-2 mb-3">
             <button id="tab-my-log" onclick="switchTab('my')" class="tab-active px-4 py-1.5 rounded-lg text-sm font-bold">Nhật ký của tôi</button>
             <button id="tab-all-log" onclick="switchTab('all')" class="tab-inactive px-4 py-1.5 rounded-lg text-sm font-bold">Tất cả người học</button>
+        </div>
+        <div id="search-bar-container" class="mb-3 bg-white rounded-xl border border-gray-200 p-2.5 shadow-sm flex items-center gap-2 flex-wrap">
+            <i class="fa-solid fa-magnifying-glass text-gray-400 text-sm shrink-0"></i>
+            <input type="text" id="search-input" placeholder="Tìm lại câu hoặc từ trong phần Tiếng Anh để trở lại bài học cũ..."
+                   class="flex-1 min-w-[200px] px-3 py-1.5 text-sm rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-800"
+                   oninput="onSearchInput()" onkeydown="onSearchKeydown(event)">
+            <span id="search-result-count" class="hidden text-xs font-semibold text-gray-500 whitespace-nowrap"></span>
+            <div id="search-nav-buttons" class="hidden items-center gap-1 shrink-0">
+                <button onclick="gotoPrevSearchMatch()" title="Kết quả trước" class="w-7 h-7 flex items-center justify-center rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs"><i class="fa-solid fa-chevron-up"></i></button>
+                <button onclick="gotoNextSearchMatch()" title="Kết quả tiếp theo" class="w-7 h-7 flex items-center justify-center rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs"><i class="fa-solid fa-chevron-down"></i></button>
+            </div>
+            <button id="search-clear-btn" onclick="clearSearch()" title="Xóa tìm kiếm" class="hidden shrink-0 w-7 h-7 flex items-center justify-center rounded-lg bg-red-50 hover:bg-red-100 text-red-500 text-xs"><i class="fa-solid fa-xmark"></i></button>
         </div>
         <div id="view-single" class="grid grid-cols-1 md:grid-cols-2 gap-4 h-full min-h-0">
             <div class="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col h-full min-h-0 overflow-hidden">
@@ -580,6 +607,7 @@ function renderLogs() {
         // --- VI item ---
         const viItem = document.createElement("div");
         viItem.className = baseCls;
+        viItem.id = `vi-log-item-${originalIndex}`;
         viItem.onclick = () => { selectedIndex = originalIndex; renderLogs(); };
         const viContent = document.createElement("div");
         viContent.className = "content-text text-sm text-gray-700";
@@ -1005,6 +1033,129 @@ function startVoiceRecord(langCode) {
     const rec = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
     rec.lang = langCode; rec.start();
     rec.onresult = e => { document.getElementById("text-input").innerHTML = e.results[0][0].transcript; };
+}
+
+// ============================================================
+// TÌM KIẾM CÂU/TỪ CŨ TRONG PHẦN TIẾNG ANH
+// Người dùng nhập 1 câu hoặc 1 cụm/vài từ tiếng Anh -> hệ thống dò
+// trong toàn bộ learningLogs đang hiển thị (phần "en"), cuộn tới và
+// tô sáng đúng câu học liên quan (cả cột Anh lẫn cột Việt tương ứng)
+// để dễ dàng tìm lại bài học cũ. Chỉ tìm trên dữ liệu ĐÃ TẢI ở client
+// (không gọi API mới) nên không ảnh hưởng gì tới các chức năng khác.
+// ============================================================
+let searchMatchIndexes = [];
+let searchMatchPos = -1;
+let searchDebounceTimer = null;
+
+// Bỏ hết thẻ HTML, chỉ lấy phần chữ thuần để so khớp tìm kiếm (tránh
+// việc thẻ <b>, <i>, <table>... làm sai lệch kết quả tìm).
+function stripHtmlToPlainText(html) {
+    const tmp = document.createElement("div");
+    tmp.innerHTML = html || "";
+    return (tmp.textContent || tmp.innerText || "").replace(/\s+/g, " ").trim();
+}
+
+function onSearchInput() {
+    clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = setTimeout(runSearch, 250);
+}
+
+function onSearchKeydown(e) {
+    if (e.key === "Enter") {
+        e.preventDefault();
+        if (searchMatchIndexes.length > 0) gotoNextSearchMatch();
+        else runSearch();
+    }
+}
+
+function runSearch() {
+    const rawQuery = document.getElementById("search-input").value.trim();
+    const countEl = document.getElementById("search-result-count");
+    const navEl = document.getElementById("search-nav-buttons");
+    const clearBtn = document.getElementById("search-clear-btn");
+
+    clearSearchHighlights();
+
+    if (!rawQuery) {
+        searchMatchIndexes = []; searchMatchPos = -1;
+        countEl.classList.add("hidden");
+        navEl.classList.add("hidden");
+        clearBtn.classList.add("hidden");
+        return;
+    }
+
+    clearBtn.classList.remove("hidden");
+
+    const query = rawQuery.toLowerCase();
+    searchMatchIndexes = [];
+    (learningLogs || []).forEach((log, idx) => {
+        const plainEn = stripHtmlToPlainText(log.en).toLowerCase();
+        if (plainEn.includes(query)) searchMatchIndexes.push(idx);
+    });
+
+    if (searchMatchIndexes.length === 0) {
+        countEl.textContent = "Không tìm thấy câu học nào phù hợp";
+        countEl.classList.remove("hidden");
+        navEl.classList.add("hidden");
+        searchMatchPos = -1;
+        return;
+    }
+
+    navEl.classList.remove("hidden");
+    searchMatchPos = 0;
+    goToSearchMatch();
+}
+
+function updateSearchCountLabel() {
+    const countEl = document.getElementById("search-result-count");
+    countEl.textContent = `${searchMatchPos + 1}/${searchMatchIndexes.length} kết quả`;
+    countEl.classList.remove("hidden");
+}
+
+function clearSearchHighlights() {
+    document.querySelectorAll(".search-active-highlight").forEach(el => el.classList.remove("search-active-highlight"));
+}
+
+// Cuộn tới và tô sáng đúng câu học đang được trỏ tới (cả 2 cột Anh/Việt)
+function goToSearchMatch() {
+    if (searchMatchPos < 0 || searchMatchPos >= searchMatchIndexes.length) return;
+    clearSearchHighlights();
+    const originalIndex = searchMatchIndexes[searchMatchPos];
+
+    const enEl = document.getElementById(`en-log-item-${originalIndex}`);
+    const viEl = document.getElementById(`vi-log-item-${originalIndex}`);
+
+    if (enEl) {
+        enEl.classList.add("search-active-highlight");
+        enEl.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    if (viEl) {
+        viEl.classList.add("search-active-highlight");
+        viEl.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+
+    updateSearchCountLabel();
+}
+
+function gotoNextSearchMatch() {
+    if (searchMatchIndexes.length === 0) return;
+    searchMatchPos = (searchMatchPos + 1) % searchMatchIndexes.length;
+    goToSearchMatch();
+}
+
+function gotoPrevSearchMatch() {
+    if (searchMatchIndexes.length === 0) return;
+    searchMatchPos = (searchMatchPos - 1 + searchMatchIndexes.length) % searchMatchIndexes.length;
+    goToSearchMatch();
+}
+
+function clearSearch() {
+    document.getElementById("search-input").value = "";
+    clearSearchHighlights();
+    searchMatchIndexes = []; searchMatchPos = -1;
+    document.getElementById("search-result-count").classList.add("hidden");
+    document.getElementById("search-nav-buttons").classList.add("hidden");
+    document.getElementById("search-clear-btn").classList.add("hidden");
 }
 
 function toggleAdminPanel() { document.getElementById("admin-panel").classList.toggle("hidden"); }
