@@ -271,6 +271,12 @@ let readingStartTime = 0;        // thời điểm bắt đầu đọc (Date.now
 let pausedAtMs = 0;              // tổng ms đã trôi qua khi nhấn pause
 let readingStartIdx = 0;         // index từ bắt đầu đọc lần này
 
+// Tốc độ đọc THẬT (ký tự/ms) được suy ra từ các mốc thời gian thật do
+// sự kiện onboundary cung cấp trong lần đọc hiện tại. null = chưa có dữ
+// liệu, dùng ước lượng tĩnh ban đầu. Được reset mỗi khi bắt đầu 1 lượt
+// đọc mới (startReadingFrom) -> xem recalibrateHighlightSchedule().
+let calibratedCharsPerMs = null;
+
 // ============================================================
 // TÍNH THỜI GIAN MỖI TỪ — dựa trên số ký tự + tốc độ
 // Trung bình tiếng Anh: ~13 ký tự/giây ở rate=1
@@ -640,6 +646,60 @@ function scheduleHighlights(startIdx, starts, rate) {
     }
 }
 
+// ============================================================
+// HIỆU CHỈNH LỊCH HIGHLIGHT THEO THỜI GIAN THẬT (chống lệch dần khi
+// đoạn văn dài)
+// ------------------------------------------------------------
+// Lịch highlight ban đầu (scheduleHighlights) chỉ dựa trên 1 ước lượng
+// TĨNH (13 ký tự/giây ở rate=1) tính 1 lần duy nhất lúc bắt đầu đọc. Tốc
+// độ đọc THẬT của mỗi giọng/trình duyệt (Chrome, Cốc Cốc...) luôn khác
+// con số ước lượng này ít nhiều, nên sai số cộng dồn theo từng từ -> câu
+// càng dài thì highlight càng lệch xa so với giọng đọc.
+//
+// Mỗi khi trình duyệt bắn được sự kiện onboundary (mốc thời gian THẬT,
+// không phải ước lượng), hàm này:
+//   1) Suy ra tốc độ đọc thật (ký tự/ms) từ mốc thời gian đó, làm mượt
+//      bằng trung bình trượt (EMA) để không bị giật cục nếu 1 mốc bị
+//      nhiễu.
+//   2) Hủy các timer cũ (đang lệch) và LÊN LỊCH LẠI cho các từ còn lại,
+//      tính từ NGAY thời điểm hiện tại theo tốc độ vừa hiệu chỉnh.
+// Nhờ vậy highlight liên tục tự "bắt kịp" giọng đọc trong suốt quá
+// trình đọc, thay vì trôi dần theo 1 lịch tính sẵn từ đầu. Nếu trình
+// duyệt nào đó không bắn onboundary, hàm này đơn giản không được gọi và
+// hệ thống tự động dùng lại lịch ước lượng tĩnh ban đầu như cũ (không
+// đổi hành vi với các trình duyệt đó).
+function recalibrateHighlightSchedule(wordsFromHere, startIdx, foundRelIdx) {
+    // Số ký tự (kể cả khoảng trắng) TRƯỚC từ vừa được onboundary xác
+    // nhận -> dùng làm căn cứ suy ra tốc độ đọc thật tính đến thời điểm
+    // này.
+    let charsBeforeFoundWord = 0;
+    for (let i = 0; i < foundRelIdx; i++) charsBeforeFoundWord += wordsFromHere[i].length + 1;
+
+    const actualElapsed = Date.now() - readingStartTime;
+    if (charsBeforeFoundWord > 0 && actualElapsed > 0) {
+        const measuredCharsPerMs = charsBeforeFoundWord / actualElapsed;
+        calibratedCharsPerMs = calibratedCharsPerMs
+            ? (calibratedCharsPerMs * 0.6 + measuredCharsPerMs * 0.4)
+            : measuredCharsPerMs;
+    }
+    // Chưa đủ dữ liệu để hiệu chỉnh (ví dụ boundary đầu tiên rơi ngay
+    // vào từ số 0) -> giữ nguyên lịch ước lượng tĩnh ban đầu.
+    if (!calibratedCharsPerMs) return;
+
+    clearHighlightTimers();
+    let offsetChars = 0; // số ký tự tính từ NGAY BÂY GIỜ tới đầu mỗi từ sắp tới
+    for (let i = foundRelIdx + 1; i < wordsFromHere.length; i++) {
+        const delay = Math.max(0, offsetChars / calibratedCharsPerMs);
+        const idx = startIdx + i;
+        const id = setTimeout(() => {
+            if (!currentUtterance || isPaused) return;
+            highlightWordAt(idx);
+        }, delay);
+        highlightTimers.push(id);
+        offsetChars += wordsFromHere[i].length + 1;
+    }
+}
+
 function stopReading() {
     clearHighlightTimers();
     if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
@@ -650,6 +710,7 @@ function stopReading() {
     currentWordsQueue = [];
     wordStartTimes = [];
     totalDurationMs = 0;
+    calibratedCharsPerMs = null;
     document.getElementById("reading-controls").classList.add("hidden");
     document.getElementById("current-time").innerText = "0:00";
     document.getElementById("seek-slider").value = 0;
@@ -703,6 +764,9 @@ function startReadingFrom(startIdx) {
     window.speechSynthesis.cancel();
     isPaused = false;
     pausedAtMs = 0;
+    // Mỗi lượt đọc mới (play/resume/seek) đều có thể có tốc độ thật khác
+    // nhau -> reset hiệu chỉnh, để tự học lại từ đầu lượt đọc này.
+    calibratedCharsPerMs = null;
     document.getElementById("pause-text").innerText = "TẠM DỪNG";
     document.getElementById("pause-icon").className = "fa-solid fa-pause";
 
@@ -745,21 +809,28 @@ function startReadingFrom(startIdx) {
         stopReading();
     };
 
-    // onboundary vẫn giữ làm fallback/correction nếu browser hỗ trợ tốt
-    // Nếu boundary fire thì cancel timer tương ứng và highlight ngay
+    // onboundary: mốc thời gian THẬT do trình duyệt phát ra ngay khi giọng
+    // đọc bắt đầu từng từ. Được dùng làm nguồn xác thực chính để: (1)
+    // highlight đúng từ ngay lập tức, và (2) hiệu chỉnh lại toàn bộ lịch
+    // highlight cho các từ còn lại theo tốc độ đọc thật -> highlight luôn
+    // bắt kịp giọng đọc dù đoạn văn dài hay ngắn (xem
+    // recalibrateHighlightSchedule). Nếu trình duyệt không hỗ trợ tốt sự
+    // kiện này, onboundary đơn giản không fire (hoặc fire thưa) và hệ
+    // thống tự động dùng lại lịch ước lượng ban đầu từ scheduleHighlights
+    // như cũ.
     utterance.onboundary = function(event) {
         if (event.name !== 'word') return;
-        // Tìm index từ gần nhất theo charIndex
+        // Tìm index từ (tương đối trong đoạn đang đọc) gần nhất theo charIndex
         let charPos = 0;
-        let foundIdx = startIdx;
+        let foundRelIdx = 0;
         for (let i = 0; i < wordsFromHere.length; i++) {
-            if (charPos >= event.charIndex) { foundIdx = startIdx + i; break; }
+            if (charPos >= event.charIndex) { foundRelIdx = i; break; }
             charPos += wordsFromHere[i].length + 1;
-            foundIdx = startIdx + i;
+            foundRelIdx = i;
         }
-        // Nếu boundary fire sớm hơn timer, highlight ngay và hủy timer đó
-        // (chỉ override nếu gap hợp lý)
+        const foundIdx = startIdx + foundRelIdx;
         highlightWordAt(foundIdx);
+        recalibrateHighlightSchedule(wordsFromHere, startIdx, foundRelIdx);
     };
 
     currentUtterance = utterance;
