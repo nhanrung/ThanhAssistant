@@ -214,7 +214,7 @@
         </div>
         <div id="search-bar-container" class="mb-3 bg-white rounded-xl border border-gray-200 p-2.5 shadow-sm flex items-center gap-2 flex-wrap">
             <i class="fa-solid fa-magnifying-glass text-gray-400 text-sm shrink-0"></i>
-            <input type="text" id="search-input" placeholder="Tìm lại câu hoặc từ trong phần Tiếng Anh để trở lại bài học cũ..."
+            <input type="text" id="search-input" placeholder="Tìm lại câu/từ (Tiếng Anh hoặc Tiếng Việt) để trở lại bài học cũ..."
                    class="flex-1 min-w-[200px] px-3 py-1.5 text-sm rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-800"
                    oninput="onSearchInput()" onkeydown="onSearchKeydown(event)">
             <span id="search-result-count" class="hidden text-xs font-semibold text-gray-500 whitespace-nowrap"></span>
@@ -1036,12 +1036,13 @@ function startVoiceRecord(langCode) {
 }
 
 // ============================================================
-// TÌM KIẾM CÂU/TỪ CŨ TRONG PHẦN TIẾNG ANH
-// Người dùng nhập 1 câu hoặc 1 cụm/vài từ tiếng Anh -> hệ thống dò
-// trong toàn bộ learningLogs đang hiển thị (phần "en"), cuộn tới và
-// tô sáng đúng câu học liên quan (cả cột Anh lẫn cột Việt tương ứng)
-// để dễ dàng tìm lại bài học cũ. Chỉ tìm trên dữ liệu ĐÃ TẢI ở client
-// (không gọi API mới) nên không ảnh hưởng gì tới các chức năng khác.
+// TÌM KIẾM CÂU/TỪ CŨ (TIẾNG ANH HOẶC TIẾNG VIỆT)
+// Người dùng nhập 1 câu hoặc 1 cụm/vài từ — bằng tiếng Anh (phần "en")
+// HOẶC tiếng Việt (phần "vi") đều được -> hệ thống dò trong toàn bộ
+// learningLogs đang hiển thị, cuộn tới và tô sáng đúng câu học liên
+// quan (cả cột Anh lẫn cột Việt tương ứng) để dễ dàng tìm lại bài học
+// cũ. Chỉ tìm trên dữ liệu ĐÃ TẢI ở client (không gọi API mới) nên
+// không ảnh hưởng gì tới các chức năng khác.
 // ============================================================
 let searchMatchIndexes = [];
 let searchMatchPos = -1;
@@ -1090,7 +1091,8 @@ function runSearch() {
     searchMatchIndexes = [];
     (learningLogs || []).forEach((log, idx) => {
         const plainEn = stripHtmlToPlainText(log.en).toLowerCase();
-        if (plainEn.includes(query)) searchMatchIndexes.push(idx);
+        const plainVi = stripHtmlToPlainText(log.vi).toLowerCase();
+        if (plainEn.includes(query) || plainVi.includes(query)) searchMatchIndexes.push(idx);
     });
 
     if (searchMatchIndexes.length === 0) {
