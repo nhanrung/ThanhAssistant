@@ -10,7 +10,7 @@
         "created_at": "19/07/2026 21:33"
     },
     "mien": {
-        "password": "meou",
+        "password": "scrypt:32768:8:1$IFd7ohnsLhISf1wI$7d02d87e9cb65b4103ad8d87ccc040844c81e4969f91f53aaf0d599e2f7bd0143df8af589b0742afa88674462a82e1542c4206404b9f12626545674680fefba8",
         "display_name": "mien",
         "created_at": "21/07/2026 15:11"
     }
