@@ -330,16 +330,18 @@ if not _github_storage_configured():
 # CHIẾN LƯỢC DỊCH 3 TẦNG (mới):
 #   1) Gemini AI (Google) — ưu tiên hàng đầu, chất lượng dịch ngữ cảnh tốt
 #      nhất trong 3 lựa chọn hiện có.
-#   2) Groq AI (openai/gpt-oss-120b) — dùng khi Gemini bị quá tải / lỗi /
+#   2) Groq AI (qwen/qwen3.6-27b) — dùng khi Gemini bị quá tải / lỗi /
 #      hết hạn mức (429, 503, timeout, v.v.)
 #   3) Google Translate (free_translate) — phương án cuối cùng, chỉ dùng
 #      khi CẢ HAI AI ở trên đều thất bại.
 #
 # GHI CHÚ CŨ (vẫn còn giá trị cho tầng Groq):
-# Model cũ "llama3-8b-8192" đã bị Groq NGỪNG HỖ TRỢ (decommissioned) từ
-# 30/08/2025. -> Đổi sang "openai/gpt-oss-120b": model production hiện tại
-# của Groq, chất lượng dịch đa ngôn ngữ tốt, KHÔNG nằm trong danh sách
-# model sắp bị deprecate.
+# Model cũ "llama3-8b-8192", rồi "llama-3.3-70b-versatile" đều đã bị Groq
+# NGỪNG HỖ TRỢ (decommissioned). Từng đổi sang "openai/gpt-oss-120b", và
+# nay đổi tiếp sang "qwen/qwen3.6-27b": model Qwen3.6 mới nhất trên Groq
+# (LƯU Ý: KHÔNG dùng "qwen/qwen3-32b" — model đó cũng đang trong danh
+# sách bị Groq khai tử). Qwen3.6-27b có chất lượng dịch đa ngôn ngữ tốt
+# và hiện KHÔNG nằm trong danh sách model sắp bị deprecate.
 #
 # ------------------------------------------------------------------
 # AN TOÀN API KEY — BẮT BUỘC ĐỌC:
@@ -407,7 +409,7 @@ GEMINI_TRANSLATE_MODEL = "gemini-3.5-flash"
 GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_TRANSLATE_MODEL}:generateContent"
 
 GROQ_API_KEYS = _load_key_list("GROQ_API_KEYS", "GROQ_API_KEY")
-GROQ_TRANSLATE_MODEL = "openai/gpt-oss-120b"
+GROQ_TRANSLATE_MODEL = "qwen/qwen3.6-27b"
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 if not GEMINI_API_KEYS:
@@ -490,8 +492,6 @@ def _get_request_ai_deadline():
 CIRCUIT_BREAKER_THRESHOLD = 2   # số lỗi Timeout/429 LIÊN TIẾP để ngắt mạch
 
 _circuit_breaker_local = threading.local()
-_cb_lock = threading.Lock()   # bảo vệ việc cập nhật state khi state được
-                               # CHIA SẺ giữa nhiều luồng (xem _bind_ai_request_context)
 
 
 def _start_request_circuit_breaker():
@@ -524,17 +524,16 @@ def _cb_record_failure(provider):
     """Ghi nhận 1 lỗi Timeout/429 của provider. Trả về True nếu lần ghi
     nhận này vừa làm mạch bị NGẮT (để hàm gọi dừng thử các key còn lại
     ngay lập tức thay vì tốn thêm thời gian)."""
-    with _cb_lock:
-        st = _get_circuit_breaker_state()[provider]
-        st["consecutive_fails"] += 1
-        just_tripped = False
-        if st["consecutive_fails"] >= CIRCUIT_BREAKER_THRESHOLD and not st["tripped"]:
-            st["tripped"] = True
-            just_tripped = True
-            print(f"[CircuitBreaker] {provider}: {st['consecutive_fails']} lỗi "
-                  f"Timeout/429 LIÊN TIẾP -> NGẮT MẠCH provider này cho TOÀN BỘ "
-                  f"các chunk còn lại của request hiện tại.")
-        return just_tripped
+    st = _get_circuit_breaker_state()[provider]
+    st["consecutive_fails"] += 1
+    just_tripped = False
+    if st["consecutive_fails"] >= CIRCUIT_BREAKER_THRESHOLD and not st["tripped"]:
+        st["tripped"] = True
+        just_tripped = True
+        print(f"[CircuitBreaker] {provider}: {st['consecutive_fails']} lỗi "
+              f"Timeout/429 LIÊN TIẾP -> NGẮT MẠCH provider này cho TOÀN BỘ "
+              f"các chunk còn lại của request hiện tại.")
+    return just_tripped
 
 
 def _cb_record_success(provider):
@@ -542,51 +541,8 @@ def _cb_record_success(provider):
     'đóng lại' mạch đã bị ngắt trong CÙNG request — 1 lần ngắt là ngắt cho
     hết request đó, tránh dao động lãng phí thời gian; mạch sẽ tự mở lại
     sạch sẽ ở request KẾ TIẾP)."""
-    with _cb_lock:
-        st = _get_circuit_breaker_state()[provider]
-        st["consecutive_fails"] = 0
-
-
-# ------------------------------------------------------------
-# CHIA SẺ ngân sách thời gian + circuit breaker SANG CÁC LUỒNG WORKER
-# ------------------------------------------------------------
-# LỖI THỰC TẾ ĐÃ GẶP (khiến bảng <table> nhiều ô dịch -> worker bị
-# Gunicorn/Render KILL giữa chừng -> "chương trình không chạy được"):
-# _ai_deadline_local và _circuit_breaker_local ở trên là threading.local(),
-# nghĩa là MỖI LUỒNG (thread) có bản sao RIÊNG. Khi 1 bảng có nhiều ô cần
-# dịch fallback song song, code dùng ThreadPoolExecutor để tạo các luồng
-# WORKER MỚI — nhưng các luồng mới đó KHÔNG hề có deadline/circuit breaker
-# đã mở sẵn ở luồng chính (luồng xử lý request HTTP), nên mỗi luồng worker
-# tự ý mở 1 ngân sách 35 giây + circuit breaker "sạch" HOÀN TOÀN RIÊNG của
-# nó, rồi vẫn tiếp tục thử gọi thật Gemini/Groq (dù luồng chính đã ngắt
-# mạch từ trước) -> tổng thời gian xử lý thật của cả request (cộng dồn
-# qua nhiều luồng chạy song song, nhiều ô bảng) có thể vượt xa 35 giây dự
-# kiến ban đầu -> chạm ngưỡng WORKER TIMEOUT của Gunicorn -> worker bị
-# kill giữa chừng, request không bao giờ trả lời được.
-#
-# GIẢI PHÁP: trước khi tạo các luồng worker, luồng chính "chụp" lại đúng
-# deadline + đúng state circuit breaker của nó (_snapshot_ai_request_context),
-# rồi mỗi luồng worker GÁN LẠI (bind) đúng deadline + đúng state đó cho
-# chính nó ngay khi bắt đầu chạy (_bind_ai_request_context) — thay vì tự
-# tạo mới. Nhờ vậy toàn bộ luồng (kể cả chạy song song) LUÔN dùng CHUNG 1
-# ngân sách thời gian + CHUNG 1 trạng thái circuit breaker với luồng
-# chính, đúng như thiết kế ban đầu, không bao giờ vượt AI_TOTAL_TIME_BUDGET.
-def _snapshot_ai_request_context():
-    """Gọi ở LUỒNG CHÍNH, ngay TRƯỚC khi tạo ThreadPoolExecutor, để lấy
-    (deadline, state_circuit_breaker) hiện tại cần truyền sang các luồng
-    worker."""
-    return (_get_request_ai_deadline(), _get_circuit_breaker_state())
-
-
-def _bind_ai_request_context(ctx):
-    """Gọi ở ĐẦU mỗi hàm chạy BÊN TRONG 1 luồng worker (ThreadPoolExecutor)
-    để gán đúng deadline + đúng state circuit breaker đã chụp từ luồng
-    chính (`ctx` = kết quả của _snapshot_ai_request_context) cho luồng
-    hiện tại, thay vì để luồng đó tự tạo ngân sách/circuit breaker mới
-    hoàn toàn riêng của nó."""
-    deadline, cb_state = ctx
-    _ai_deadline_local.value = deadline
-    _circuit_breaker_local.state = cb_state
+    st = _get_circuit_breaker_state()[provider]
+    st["consecutive_fails"] = 0
 
 # ============================================================
 # QUẢN LÝ DANH SÁCH USER CON
@@ -918,11 +874,6 @@ def clean_html_for_spellcheck(text):
     if not text:
         return ""
     cleaned = text.replace("<br>", "\n").replace("<p>", "").replace("</p>", "\n")
-    # Bảng (<table>): thêm khoảng trắng/xuống dòng ở ranh giới ô/hàng
-    # TRƯỚC KHI xoá tag, để chữ ở các ô cạnh nhau không bị dính liền vào
-    # nhau (vd "beautifulbig") khi tính phiên âm IPA / kiểm tra ngữ pháp.
-    cleaned = re.sub(r'</t[dh]>', ' ', cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r'</tr>', '\n', cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r'<[^>]+>', '', cleaned)            # bỏ các tag HTML còn lại
     cleaned = html_lib.unescape(cleaned)                  # &nbsp; -> ' ', &amp; -> '&', ...
     cleaned = cleaned.replace('\xa0', ' ')                # khoảng trắng không ngắt dòng -> khoảng trắng thường
@@ -1421,10 +1372,13 @@ def _call_gemini_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3,
 def _call_groq_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3, deadline=None):
     """
     Hàm gọi Groq API — TẦNG DỊCH DỰ PHÒNG SỐ 2 (khi Gemini quá tải/lỗi).
-    - model: openai/gpt-oss-120b (xem ghi chú ở đầu file vì sao đổi model)
+    - model: qwen/qwen3.6-27b (xem ghi chú ở đầu file vì sao đổi model)
     - temperature thấp (0.3): bản dịch ổn định, ít "sáng tạo lệch nghĩa"
-    - reasoning_effort: "low" vì dịch thuật không cần suy luận sâu, giúp
-      trả lời nhanh hơn trên model dạng reasoning như gpt-oss.
+    - reasoning_effort: "none" (tắt chế độ "thinking") vì dịch thuật không
+      cần suy luận sâu, giúp trả lời nhanh hơn. LƯU Ý: Qwen 3.6 chỉ chấp
+      nhận "default" hoặc "none" cho tham số này — KHÔNG dùng "low"/
+      "medium"/"high" (đó là dải giá trị riêng của model GPT-OSS, Groq sẽ
+      trả lỗi 400 nếu gửi nhầm sang Qwen).
     Trả về chuỗi đã dịch, hoặc None nếu thất bại (để hàm gọi tự quyết định
     phương án dự phòng cuối cùng là Google Translate).
 
@@ -1458,7 +1412,7 @@ def _call_groq_chat(system_prompt, user_msg, max_tokens=1500, temperature=0.3, d
                 "model": GROQ_TRANSLATE_MODEL,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
-                "reasoning_effort": "low",
+                "reasoning_effort": "none",
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg}
@@ -2290,17 +2244,7 @@ def translate_preserving_html(html_text, source_lang, target_lang, context=None)
             print(f"[Smart Batching - HTML] {len(fail_positions)}/{len(tagged_texts)} dòng có định dạng "
                   f"bị AI làm hỏng thẻ số hoặc lỗi -> fallback dịch riêng SONG SONG cho các dòng này...")
 
-            # Chụp lại deadline + circuit breaker của LUỒNG CHÍNH trước khi
-            # tạo các luồng worker bên dưới, để mọi luồng worker dùng CHUNG
-            # đúng 1 ngân sách thời gian + đúng 1 trạng thái circuit breaker
-            # với luồng chính (xem ghi chú tại _snapshot_ai_request_context),
-            # thay vì mỗi luồng mới tự mở ngân sách/circuit breaker riêng
-            # của nó -> vốn là nguyên nhân khiến việc dịch bảng nhiều ô có
-            # thể chạy vượt xa AI_TOTAL_TIME_BUDGET và làm worker bị KILL.
-            _ai_ctx = _snapshot_ai_request_context()
-
             def _fallback_one(pos):
-                _bind_ai_request_context(_ai_ctx)
                 i = tagged_idx[pos]
                 info = para_infos[i]
                 fallback_segments = [{"text": c["text"], "tags": c["tags"], "is_br": False} for c in info["chunks"]]
@@ -2329,107 +2273,6 @@ def translate_preserving_html(html_text, source_lang, target_lang, context=None)
             result_parts.append(translated_by_idx[i])
 
     return "".join(result_parts)
-
-def _translate_table_html(table_html, source_lang, target_lang, context=None):
-    """
-    Dịch MỘT bảng HTML (<table>...</table>), GIỮ NGUYÊN 100% cấu trúc
-    bảng — đúng số hàng/cột, đúng thẻ <table>/<tr>/<td>/<th> cùng MỌI
-    thuộc tính gốc (border, style vẽ khung, colspan, rowspan, class...).
-    CHỈ phần CHỮ bên trong từng ô được dịch. Nếu một ô có định dạng riêng
-    (đậm/nghiêng/gạch chân/gạch ngang) thì định dạng đó cũng được giữ
-    nguyên trong bản dịch của đúng ô đó.
-
-    CÁCH LÀM: lấy nội dung bên trong TỪNG ô (<td>/<th>), NỐI các ô lại
-    thành 1 chuỗi HTML duy nhất bằng dấu ngắt dòng <br> làm ranh giới,
-    rồi dùng LẠI translate_preserving_html() (đã có sẵn Smart Batching +
-    giữ định dạng) để dịch NỘI DUNG CỦA MỌI Ô chỉ trong 1 lượt xử lý —
-    thay vì gọi AI riêng cho từng ô (rất chậm với bảng nhiều ô/nhiều
-    hàng). Dịch xong, tách lại đúng số ô ban đầu và ráp trở lại đúng vị
-    trí, giữ nguyên thẻ mở/đóng + thuộc tính gốc (khung/border) của từng
-    ô — các phần khác của bảng không hề bị thay đổi.
-    """
-    cell_pattern = re.compile(r'(<t[dh]\b[^>]*>)(.*?)(</t[dh]>)', re.IGNORECASE | re.DOTALL)
-    matches = list(cell_pattern.finditer(table_html))
-    if not matches:
-        return table_html  # Không tìm thấy ô hợp lệ nào -> giữ nguyên bảng gốc
-
-    cell_inners = [m.group(2) for m in matches]
-
-    # Ghép nội dung mọi ô lại bằng <br>, dịch chung 1 lượt.
-    joined = "<br>".join(cell_inners)
-    translated_joined = (
-        translate_preserving_html(joined, source_lang, target_lang, context=context)
-        if joined.strip() else joined
-    )
-    translated_cells = re.split(r'<br\s*/?>', translated_joined, flags=re.IGNORECASE)
-
-    # Phòng trường hợp hiếm số phần tách ra không khớp số ô ban đầu (ví
-    # dụ 1 ô đã có sẵn <br> riêng bên trong làm lệch ranh giới) -> dịch
-    # lại AN TOÀN từng ô riêng lẻ để không bao giờ làm vỡ cấu trúc bảng.
-    if len(translated_cells) != len(cell_inners):
-        translated_cells = [
-            translate_preserving_html(c, source_lang, target_lang, context=context) if c.strip() else c
-            for c in cell_inners
-        ]
-
-    # Ráp lại bảng: giữ NGUYÊN thẻ mở/đóng gốc của từng ô (kèm mọi thuộc
-    # tính: border, style vẽ khung, colspan, rowspan...), chỉ thay phần
-    # chữ bên trong bằng bản dịch.
-    result = []
-    last_end = 0
-    for idx, m in enumerate(matches):
-        result.append(table_html[last_end:m.start()])
-        open_tag, close_tag = m.group(1), m.group(3)
-        result.append(open_tag + translated_cells[idx] + close_tag)
-        last_end = m.end()
-    result.append(table_html[last_end:])
-    return "".join(result)
-
-
-def _translate_text_with_tables(html_text, source_lang, target_lang, context=None):
-    """
-    Điều phối dịch cho văn bản có chứa 1 hoặc nhiều bảng (<table>) trộn
-    lẫn với chữ thường: tách các bảng ra khỏi nội dung, dịch phần chữ
-    NẰM NGOÀI bảng theo ĐÚNG cách xử lý cũ (vẫn giữ đậm/nghiêng/gạch
-    chân/ngắt dòng nếu có — KHÔNG thay đổi hành vi hiện tại), còn phần
-    NẰM TRONG mỗi bảng được dịch riêng bằng _translate_table_html() để
-    GIỮ NGUYÊN khung/border và số hàng/cột của bảng gốc. Cuối cùng ghép
-    lại đúng thứ tự ban đầu — các phần khác giữ nguyên không đổi.
-    """
-    table_pattern = re.compile(r'<table\b.*?</table>', re.IGNORECASE | re.DOTALL)
-    segments = []
-    last_end = 0
-    for m in table_pattern.finditer(html_text):
-        segments.append(("text", html_text[last_end:m.start()]))
-        segments.append(("table", m.group(0)))
-        last_end = m.end()
-    segments.append(("text", html_text[last_end:]))
-
-    result_parts = []
-    for kind, content in segments:
-        if kind == "table":
-            result_parts.append(_translate_table_html(content, source_lang, target_lang, context=context))
-            continue
-        if not content.strip():
-            result_parts.append(content)
-            continue
-        has_formatting = bool(re.search(r'<(b|strong|i|em|s|strike|del|u|br)[^>]*>', content, re.IGNORECASE))
-        if has_formatting:
-            result_parts.append(translate_preserving_html(content, source_lang, target_lang, context=context))
-            continue
-        clean_text = clean_html_for_spellcheck(content)
-        if not clean_text.strip():
-            result_parts.append(content)
-            continue
-        lines = clean_text.split('\n')
-        real_lines = [ln for ln in lines if ln.strip()]
-        if len(real_lines) <= 1:
-            result_parts.append(_translate_sentence(clean_text, source_lang, target_lang, context=context))
-        else:
-            translated_lines = _translate_lines_smart(lines, source_lang, target_lang, context=context)
-            result_parts.append("\n".join(translated_lines))
-    return "".join(result_parts)
-
 
 def _translate_sentence_atomic(clean_text, source_lang, target_lang, context=None):
     """Dịch MỘT câu/khối text thuần đã đủ ngắn (không tự chia nhỏ thêm).
@@ -2532,12 +2375,6 @@ def smart_translate(text, source_lang, target_lang, context=None):
     theo câu nếu vẫn còn dài) và GỘP LẠI thành Smart Batching để dịch
     TOÀN BỘ trong tối thiểu số lệnh gọi AI, không bao giờ dừng lại giữa
     chừng."""
-    # CÓ BẢNG (<table> — ví dụ khung kẻ ô như copy từ Word/Excel) -> dịch
-    # riêng để GIỮ NGUYÊN khung bảng (đúng số hàng/cột, đúng border/style
-    # vẽ khung), chỉ dịch phần chữ bên trong từng ô tương ứng.
-    if re.search(r'<table\b', text, re.IGNORECASE):
-        return _translate_text_with_tables(text, source_lang, target_lang, context=context)
-
     # Kiểm tra text có chứa HTML tags định dạng không
     has_formatting = bool(re.search(r'<(b|strong|i|em|s|strike|del|u|br)[^>]*>', text, re.IGNORECASE))
 
@@ -2935,27 +2772,6 @@ def api_translate():
 
 @app.route('/api/edit', methods=['POST'])
 def api_edit():
-    """
-    Sửa 1 câu học đã lưu.
-
-    QUY TẮC (giống hệt quy trình "Lưu và Dịch" — /api/translate — nhưng
-    chỉ áp dụng cho riêng câu/cụm vừa sửa, không đụng tới các câu khác
-    trong nhật ký):
-      - Nếu phần TIẾNG ANH bị thay đổi -> coi như người dùng vừa nhập 1
-        câu tiếng Anh mới: tự động DỊCH LẠI sang tiếng Việt bằng AI
-        (smart_translate), tính lại PHIÊN ÂM IPA, và CHẤM NGỮ PHÁP
-        (check_grammar_with_languagetool) y hệt như khi bấm "Dịch & Lưu".
-        Phần tiếng Việt người dùng gõ tay trong ô sửa (nếu có) sẽ được
-        THAY THẾ bằng bản dịch AI mới này, để đảm bảo 2 cột luôn khớp
-        nghĩa với câu tiếng Anh mới — đúng như hành vi của "Lưu và Dịch".
-      - Nếu phần tiếng Anh KHÔNG đổi (người dùng chỉ sửa phần tiếng
-        Việt) -> GIỮ NGUYÊN câu tiếng Anh & phiên âm IPA cũ, KHÔNG dịch
-        lại, chỉ lưu đúng nghĩa tiếng Việt mà người dùng đã tự sửa.
-    """
-    # Mở ngân sách thời gian dùng chung cho AI (dịch/ngữ pháp) trong
-    # trường hợp cần dịch lại — dùng chung cơ chế với /api/translate.
-    _start_request_ai_deadline()
-
     req_data = request.get_json()
     if not verify_request_password(req_data):
         return jsonify({"status": "error", "message": "Truy cập trái phép!"}), 401
@@ -2964,57 +2780,22 @@ def api_edit():
     idx = req_data.get('index')
 
     log = load_data(username)
-    if not (isinstance(idx, int) and 0 <= idx < len(log)):
-        return jsonify({"status": "error", "message": "Không tìm thấy câu học"}), 404
-
-    old_entry = log[idx]
-    submitted_en = req_data.get('en', '').strip()
-    submitted_vi = req_data.get('vi', '').strip()
-
-    # So sánh phần tiếng Anh CŨ và MỚI sau khi đã làm sạch HTML/khoảng
-    # trắng thừa (contenteditable hay sinh ra khác biệt định dạng dù nội
-    # dung chữ không đổi) -> tránh dịch lại "oan" khi người dùng chỉ sửa
-    # phần tiếng Việt.
-    old_en_clean = re.sub(r'\s+', ' ', clean_html_for_spellcheck(old_entry.get('en', ''))).strip()
-    new_en_clean = re.sub(r'\s+', ' ', clean_html_for_spellcheck(submitted_en)).strip()
-    en_changed = (new_en_clean != old_en_clean)
-
-    grammar_result = None
-
-    if en_changed:
-        # PHẦN TIẾNG ANH BỊ SỬA -> chạy đúng quy trình "Lưu và Dịch",
-        # nhưng chỉ cho riêng câu này (lấy vài câu gần đó làm ngữ cảnh
-        # hội thoại, giống hệt api_translate).
-        context_log = [e for i, e in enumerate(log) if i != idx]
-        conversation_context = context_log[-4:] if context_log else []
-
-        translated_vi = smart_translate(submitted_en, 'en', 'vi', context=conversation_context)
-        new_vi = translated_vi if translated_vi else "(Hệ thống dịch đang bận, vui lòng thử lại sau)"
-        new_en = submitted_en
+    if 0 <= idx < len(log):
+        new_en = req_data.get('en', '').strip()
+        new_vi = req_data.get('vi', '').strip()
         new_ipa = get_free_ipa_pronunciation(new_en)
-        grammar_result = check_grammar_with_languagetool(new_en, True)
-    else:
-        # CHỈ SỬA PHẦN TIẾNG VIỆT -> giữ nguyên câu tiếng Anh & phiên âm
-        # cũ, không dịch lại, chỉ lưu nghĩa tiếng Việt người dùng tự sửa.
-        new_en = old_entry.get('en', '')
-        new_vi = submitted_vi
-        new_ipa = old_entry.get('ipa') or get_free_ipa_pronunciation(new_en)
 
-    log[idx]['en'] = new_en
-    log[idx]['vi'] = new_vi
-    log[idx]['ipa'] = new_ipa
+        log[idx]['en'] = new_en
+        log[idx]['vi'] = new_vi
+        log[idx]['ipa'] = new_ipa
 
-    save_data(username, log)
-
-    response_payload = {
-        "status": "success",
-        "data": log,
-        "updated_ipa": new_ipa,
-        "en_retranslated": en_changed
-    }
-    if grammar_result is not None:
-        response_payload["grammar"] = grammar_result
-    return jsonify(response_payload)
+        save_data(username, log)
+        return jsonify({
+            "status": "success",
+            "data": log,
+            "updated_ipa": new_ipa
+        })
+    return jsonify({"status": "error", "message": "Không tìm thấy câu học"}), 404
 
 
 @app.route('/api/delete', methods=['POST'])
